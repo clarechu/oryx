@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -16,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +23,7 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 	"github.com/sashabaranov/go-openai"
 )
@@ -44,19 +42,20 @@ type OCRWorker struct {
 
 	// Use async goroutine to process on_hls messages.
 	msgs chan *SrsOnHlsMessage
-
+	ds   datasource.Datasource
 	// Got message from SRS, a new TS segment file is generated.
 	tsfiles chan *SrsOnHlsObject
 }
 
-func NewOCRWorker() *OCRWorker {
+func NewOCRWorker(ds datasource.Datasource) *OCRWorker {
 	v := &OCRWorker{
 		// Message on_hls.
 		msgs: make(chan *SrsOnHlsMessage, 1024),
 		// TS files.
 		tsfiles: make(chan *SrsOnHlsObject, 1024),
+		ds:      ds,
 	}
-	v.task = NewOCRTask()
+	v.task = NewOCRTask(ds)
 	v.task.ocrWorker = v
 	return v
 }
@@ -80,7 +79,7 @@ func (v *OCRWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			config := NewOCRConfig()
+			config := NewOCRConfig(v.ds)
 			if err := config.Load(ctx); err != nil {
 				return errors.Wrapf(err, "load config")
 			}
@@ -621,11 +620,11 @@ func (v *OCRWorker) Start(ctx context.Context) error {
 	logger.Tf(ctx, "ocr start a worker")
 
 	// Load task from redis and continue to run the task.
-	if objs, err := rdb.HGetAll(ctx, SRS_OCR_TASK).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_OCR_TASK); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_OCR_TASK)
 	} else if len(objs) != 1 {
 		// Only support one task right now.
-		if err = rdb.Del(ctx, SRS_OCR_TASK).Err(); err != nil && err != redis.Nil {
+		if err = v.ds.DeleteAll(ctx, SRS_OCR_TASK); err != nil {
 			return errors.Wrapf(err, "del %v", SRS_OCR_TASK)
 		}
 	} else {
@@ -815,10 +814,11 @@ type OCRConfig struct {
 	SrsAssistantProvider
 	// The AI chat configuration.
 	SrsAssistantChat
+	ds datasource.Datasource
 }
 
-func NewOCRConfig() *OCRConfig {
-	v := &OCRConfig{}
+func NewOCRConfig(ds datasource.Datasource) *OCRConfig {
+	v := &OCRConfig{ds: ds}
 	v.All = false
 	v.AIChatEnabled = true
 	return v
@@ -831,7 +831,7 @@ func (v OCRConfig) String() string {
 }
 
 func (v *OCRConfig) Load(ctx context.Context) error {
-	if b, err := rdb.HGet(ctx, SRS_OCR_CONFIG, "global").Result(); err != nil && err != redis.Nil {
+	if b, err := v.ds.Get(ctx, SRS_OCR_CONFIG, "global"); err != nil {
 		return errors.Wrapf(err, "hget %v global", SRS_OCR_CONFIG)
 	} else if len(b) > 0 {
 		if err := json.Unmarshal([]byte(b), v); err != nil {
@@ -844,7 +844,7 @@ func (v *OCRConfig) Load(ctx context.Context) error {
 func (v *OCRConfig) Save(ctx context.Context) error {
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal conf %v", v)
-	} else if err := rdb.HSet(ctx, SRS_OCR_CONFIG, "global", string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err := v.ds.Set(ctx, SRS_OCR_CONFIG, "global", string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v global %v", SRS_OCR_CONFIG, string(b))
 	}
 	return nil
@@ -1030,9 +1030,10 @@ type OCRTask struct {
 
 	// To protect the common fields.
 	lock sync.Mutex
+	ds   datasource.Datasource
 }
 
-func NewOCRTask() *OCRTask {
+func NewOCRTask(ds datasource.Datasource) *OCRTask {
 	return &OCRTask{
 		// Generate a UUID for task.
 		UUID: uuid.NewString(),
@@ -1048,6 +1049,7 @@ func NewOCRTask() *OCRTask {
 		signalPersistence: make(chan bool, 1),
 		// Create new stream signal.
 		signalNewStream: make(chan *SrsStream, 1),
+		ds:              ds,
 	}
 }
 
@@ -1155,7 +1157,7 @@ func (v *OCRTask) WatchNewStream(ctx context.Context) error {
 	}
 
 	selectActiveStream := func() (*SrsStream, error) {
-		streams, err := rdb.HGetAll(ctx, SRS_STREAM_ACTIVE).Result()
+		streams, err := v.ds.SelectAll(ctx, SRS_STREAM_ACTIVE)
 		if err != nil {
 			return nil, errors.Wrapf(err, "hgetall %v", SRS_STREAM_ACTIVE)
 		}
@@ -1534,7 +1536,7 @@ func (v *OCRTask) reset(ctx context.Context) error {
 		v.Input = ""
 
 		// Remove previous task from redis.
-		if err := rdb.HDel(ctx, SRS_OCR_TASK, v.UUID).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Delete(ctx, SRS_OCR_TASK, v.UUID); err != nil {
 			return errors.Wrapf(err, "hdel %v %v", SRS_OCR_TASK, v.UUID)
 		}
 
@@ -1623,7 +1625,7 @@ func (v *OCRTask) saveTask(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal %v", v.String())
-	} else if err = rdb.HSet(ctx, SRS_OCR_TASK, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.ds.Set(ctx, SRS_OCR_TASK, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_OCR_TASK, v.UUID, string(b))
 	}
 

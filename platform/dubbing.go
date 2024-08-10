@@ -1,5 +1,3 @@
-//go:build linux
-
 package main
 
 import (
@@ -12,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"platform/datasource"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/go-audio/audio"
 	"github.com/go-audio/wav"
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
@@ -44,7 +42,7 @@ const (
 	alwaysRephraseTranslations       = false
 )
 
-func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
+func handleDubbingService(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) error {
 	logger.Tf(ctx, "AI dubbing work dir: %v", aiDubbingWorkDir)
 
 	ep := "/terraform/v1/dubbing/create"
@@ -88,6 +86,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 			dubbing := NewSrsDubbingProject(func(dubbing *SrsDubbingProject) {
 				dubbing.Title = title
 				dubbing.FileType, dubbing.FilePath = targetFile.Type, targetFile.Path
+				dubbing.ds = ds
 			})
 
 			if err := dubbing.CheckSource(ctx, targetFile.Target); err != nil {
@@ -160,7 +159,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			var projects []*SrsDubbingProject
-			if configs, err := rdb.HGetAll(ctx, SRS_DUBBING_PROJECTS).Result(); err != nil && err != redis.Nil {
+			if configs, err := ds.SelectAll(ctx, SRS_DUBBING_PROJECTS); err != nil {
 				return errors.Wrapf(err, "hgetall %v", SRS_DUBBING_PROJECTS)
 			} else {
 				for k, v := range configs {
@@ -208,10 +207,9 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 				return errors.Wrapf(err, "load dubbing project %v", dubbingUUID)
 			}
 
-			if err := rdb.HDel(ctx, SRS_DUBBING_PROJECTS, dubbingUUID).Err(); err != nil && err != redis.Nil {
+			if err := ds.Delete(ctx, SRS_DUBBING_PROJECTS, dubbingUUID); err != nil {
 				return errors.Wrapf(err, "hdel %v %v", SRS_DUBBING_PROJECTS, dubbingUUID)
 			}
-
 			// Remove the project files.
 			if dubbing.UUID != "" {
 				projectDir := path.Join(conf.Pwd, aiDubbingWorkDir, dubbing.UUID)
@@ -291,7 +289,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 			// TODO: FIXME: Should load dubbing from redis and merge the fields.
 			if b, err := json.Marshal(dubbing); err != nil {
 				return errors.Wrapf(err, "marshal dubbing")
-			} else if err := rdb.HSet(ctx, SRS_DUBBING_PROJECTS, dubbing.UUID, string(b)).Err(); err != nil {
+			} else if err := ds.Set(ctx, SRS_DUBBING_PROJECTS, dubbing.UUID, string(b)); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_DUBBING_PROJECTS, dubbing.UUID, string(b))
 			}
 
@@ -601,6 +599,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 					task.UUID = dubbing.UUID
 					task.project = dubbing
 					task.status = SrsDubbingTaskStatusInit
+					task.ds = ds
 				})
 
 				// Add task to server, memory object in this server.
@@ -678,6 +677,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 
 			dubbing := NewSrsDubbingProject(func(dubbing *SrsDubbingProject) {
 				dubbing.UUID = dubbingUUID
+				dubbing.ds = ds
 			})
 			if err := dubbing.Load(ctx); err != nil {
 				return errors.Wrapf(err, "load dubbing project %v", dubbingUUID)
@@ -795,6 +795,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 
 			dubbing := NewSrsDubbingProject(func(dubbing *SrsDubbingProject) {
 				dubbing.UUID = dubbingUUID
+				dubbing.ds = ds
 			})
 			if err := dubbing.Load(ctx); err != nil {
 				return errors.Wrapf(err, "load dubbing project %v", dubbingUUID)
@@ -871,6 +872,7 @@ func handleDubbingService(ctx context.Context, handler *http.ServeMux) error {
 
 			dubbing := NewSrsDubbingProject(func(dubbing *SrsDubbingProject) {
 				dubbing.UUID = dubbingUUID
+				dubbing.ds = ds
 			})
 			if err := dubbing.Load(ctx); err != nil {
 				return errors.Wrapf(err, "load dubbing project %v", dubbingUUID)
@@ -1142,10 +1144,11 @@ type SrsDubbingServer struct {
 	tasks []*SrsDubbingTask
 	// The lock to protect the tasks.
 	lock sync.Mutex
+	ds   datasource.Datasource
 }
 
-func NewDubbingServer() *SrsDubbingServer {
-	return &SrsDubbingServer{}
+func NewDubbingServer(ds datasource.Datasource) *SrsDubbingServer {
+	return &SrsDubbingServer{ds: ds}
 }
 
 func (v *SrsDubbingServer) Close() error {
@@ -1656,6 +1659,7 @@ type SrsDubbingTask struct {
 	wg sync.WaitGroup
 	// The lock to protect the task.
 	lock sync.Mutex
+	ds   datasource.Datasource
 }
 
 func NewSrsDubbingTask(opts ...func(task *SrsDubbingTask)) *SrsDubbingTask {
@@ -1699,7 +1703,7 @@ func (v *SrsDubbingTask) Load(ctx context.Context) error {
 
 	dubbingUUID := v.UUID
 
-	if r0, err := rdb.HGet(ctx, SRS_DUBBING_TASKS, dubbingUUID).Result(); err != nil && err != redis.Nil {
+	if r0, err := v.ds.Get(ctx, SRS_DUBBING_TASKS, dubbingUUID); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_DUBBING_TASKS, dubbingUUID)
 	} else if r0 == "" {
 		return errors.Errorf("dubbing project %v not exists", dubbingUUID)
@@ -1718,7 +1722,7 @@ func (v *SrsDubbingTask) Save(ctx context.Context) error {
 
 	if b, err := json.Marshal(dubbing); err != nil {
 		return errors.Wrapf(err, "marshal dubbing task")
-	} else if err := rdb.HSet(ctx, SRS_DUBBING_TASKS, dubbing.UUID, string(b)).Err(); err != nil {
+	} else if err := v.ds.Set(ctx, SRS_DUBBING_TASKS, dubbing.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_DUBBING_TASKS, dubbing.UUID, string(b))
 	}
 
@@ -2193,6 +2197,7 @@ type SrsDubbingProject struct {
 
 	// The dubbing task uuid, should equals to the project uuid, if task exists.
 	TaskUUID string `json:"task"`
+	ds       datasource.Datasource
 }
 
 func NewSrsDubbingProject(opts ...func(dubbing *SrsDubbingProject)) *SrsDubbingProject {
@@ -2223,7 +2228,7 @@ func (v *SrsDubbingProject) String() string {
 func (v *SrsDubbingProject) Load(ctx context.Context) error {
 	dubbingUUID := v.UUID
 
-	if r0, err := rdb.HGet(ctx, SRS_DUBBING_PROJECTS, dubbingUUID).Result(); err != nil && err != redis.Nil {
+	if r0, err := v.ds.Get(ctx, SRS_DUBBING_PROJECTS, dubbingUUID); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_DUBBING_PROJECTS, dubbingUUID)
 	} else if r0 == "" {
 		return errors.Errorf("dubbing project %v not exists", dubbingUUID)
@@ -2239,7 +2244,7 @@ func (v *SrsDubbingProject) Save(ctx context.Context) error {
 
 	if b, err := json.Marshal(dubbing); err != nil {
 		return errors.Wrapf(err, "marshal dubbing project")
-	} else if err := rdb.HSet(ctx, SRS_DUBBING_PROJECTS, dubbing.UUID, string(b)).Err(); err != nil {
+	} else if err := v.ds.Set(ctx, SRS_DUBBING_PROJECTS, dubbing.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_DUBBING_PROJECTS, dubbing.UUID, string(b))
 	}
 

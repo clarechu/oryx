@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -14,6 +12,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,8 +22,7 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 )
 
@@ -36,10 +34,11 @@ type TranscodeWorker struct {
 
 	// The global transcode task, only support one transcode task.
 	task *TranscodeTask
+	ds   datasource.Datasource
 }
 
-func NewTranscodeWorker() *TranscodeWorker {
-	v := &TranscodeWorker{}
+func NewTranscodeWorker(ds datasource.Datasource) *TranscodeWorker {
+	v := &TranscodeWorker{ds: ds}
 	v.task = NewTranscodeTask()
 	v.task.transcodeWorker = v
 	return v
@@ -65,7 +64,7 @@ func (v *TranscodeWorker) Handle(ctx context.Context, handler *http.ServeMux) er
 			}
 
 			var config TranscodeConfig
-			if b, err := rdb.HGet(ctx, SRS_TRANSCODE_CONFIG, "global").Result(); err != nil && err != redis.Nil {
+			if b, err := v.ds.Get(ctx, SRS_TRANSCODE_CONFIG, "global"); err != nil {
 				return errors.Wrapf(err, "hget %v global", SRS_TRANSCODE_CONFIG)
 			} else if len(b) > 0 {
 				if err := json.Unmarshal([]byte(b), &config); err != nil {
@@ -104,7 +103,7 @@ func (v *TranscodeWorker) Handle(ctx context.Context, handler *http.ServeMux) er
 
 			if b, err := json.Marshal(config); err != nil {
 				return errors.Wrapf(err, "marshal conf %v", config)
-			} else if err := rdb.HSet(ctx, SRS_TRANSCODE_CONFIG, "global", string(b)).Err(); err != nil && err != redis.Nil {
+			} else if err := v.ds.Set(ctx, SRS_TRANSCODE_CONFIG, "global", string(b)); err != nil {
 				return errors.Wrapf(err, "hset %v global %v", SRS_TRANSCODE_CONFIG, string(b))
 			}
 
@@ -139,7 +138,7 @@ func (v *TranscodeWorker) Handle(ctx context.Context, handler *http.ServeMux) er
 			}
 
 			var config TranscodeConfig
-			if b, err := rdb.HGet(ctx, SRS_TRANSCODE_CONFIG, "global").Result(); err != nil && err != redis.Nil {
+			if b, err := v.ds.Get(ctx, SRS_TRANSCODE_CONFIG, "global"); err != nil {
 				return errors.Wrapf(err, "hget %v global", SRS_TRANSCODE_CONFIG)
 			} else if len(b) > 0 {
 				if err := json.Unmarshal([]byte(b), &config); err != nil {
@@ -205,7 +204,7 @@ func (v *TranscodeWorker) Start(ctx context.Context) error {
 	logger.Tf(ctx, "transcode start a worker")
 
 	// Load tasks from redis and force to kill all.
-	if objs, err := rdb.HGetAll(ctx, SRS_TRANSCODE_TASK).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_TRANSCODE_TASK); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_TRANSCODE_TASK)
 	} else if len(objs) > 0 {
 		for uuid, obj := range objs {
@@ -221,7 +220,7 @@ func (v *TranscodeWorker) Start(ctx context.Context) error {
 			}
 		}
 
-		if err = rdb.Del(ctx, SRS_TRANSCODE_TASK).Err(); err != nil && err != redis.Nil {
+		if err = v.ds.DeleteAll(ctx, SRS_TRANSCODE_TASK); err != nil {
 			return errors.Wrapf(err, "del %v", SRS_TRANSCODE_TASK)
 		}
 	}
@@ -356,7 +355,7 @@ func (v *TranscodeTask) Run(ctx context.Context) error {
 
 	// TODO: FIXME: Should select stream again when stream republished.
 	selectActiveStream := func() (*SrsStream, error) {
-		streams, err := rdb.HGetAll(ctx, SRS_STREAM_ACTIVE).Result()
+		streams, err := v.transcodeWorker.ds.SelectAll(ctx, SRS_STREAM_ACTIVE)
 		if err != nil {
 			return nil, errors.Wrapf(err, "hgetall %v", SRS_STREAM_ACTIVE)
 		}
@@ -404,7 +403,7 @@ func (v *TranscodeTask) Run(ctx context.Context) error {
 	}
 
 	pfn := func(ctx context.Context) error {
-		if b, err := rdb.HGet(ctx, SRS_TRANSCODE_CONFIG, "global").Result(); err != nil && err != redis.Nil {
+		if b, err := v.transcodeWorker.ds.Get(ctx, SRS_TRANSCODE_CONFIG, "global"); err != nil {
 			return errors.Wrapf(err, "hget %v global", SRS_TRANSCODE_CONFIG)
 		} else if len(b) > 0 {
 			if err := json.Unmarshal([]byte(b), &v.config); err != nil {
@@ -599,7 +598,7 @@ func (v *TranscodeTask) saveTask(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal %v", v.String())
-	} else if err = rdb.HSet(ctx, SRS_TRANSCODE_TASK, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.transcodeWorker.ds.Set(ctx, SRS_TRANSCODE_TASK, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_TRANSCODE_TASK, v.UUID, string(b))
 	}
 

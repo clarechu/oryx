@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -15,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"strings"
 	"sync"
 	"time"
@@ -22,8 +21,7 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 )
 
@@ -43,10 +41,12 @@ type RecordWorker struct {
 	msgs chan *SrsOnHlsObject
 	// The streams we're recording, key is m3u8 URL in string, value is m3u8 object *RecordM3u8Stream.
 	streams sync.Map
+	ds      datasource.Datasource
 }
 
-func NewRecordWorker() *RecordWorker {
+func NewRecordWorker(ds datasource.Datasource) *RecordWorker {
 	return &RecordWorker{
+		ds:   ds,
 		msgs: make(chan *SrsOnHlsObject, 1024),
 	}
 }
@@ -70,11 +70,11 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			if all, err := rdb.HGet(ctx, SRS_RECORD_PATTERNS, "all").Result(); err != nil && err != redis.Nil {
+			if all, err := v.ds.Get(ctx, SRS_RECORD_PATTERNS, "all"); err != nil {
 				return errors.Wrapf(err, "hget %v all", SRS_RECORD_PATTERNS)
-			} else if globs, err := rdb.HGet(ctx, SRS_RECORD_PATTERNS, "globs").Result(); err != nil && err != redis.Nil {
+			} else if globs, err := v.ds.Get(ctx, SRS_RECORD_PATTERNS, "globs"); err != nil {
 				return errors.Wrapf(err, "hget %v globs", SRS_RECORD_PATTERNS)
-			} else if processCpDir, err := rdb.HGet(ctx, SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile)).Result(); err != nil && err != redis.Nil {
+			} else if processCpDir, err := v.ds.Get(ctx, SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile)); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile))
 			} else {
 				globFilters := []string{}
@@ -128,7 +128,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			if err := rdb.HSet(ctx, SRS_RECORD_PATTERNS, "all", fmt.Sprintf("%v", all)).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_RECORD_PATTERNS, "all", fmt.Sprintf("%v", all)); err != nil {
 				return errors.Wrapf(err, "hset %v all %v", SRS_RECORD_PATTERNS, all)
 			}
 
@@ -169,7 +169,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 
 			if b, err := json.Marshal(filteredGlobs); err != nil {
 				return errors.Wrapf(err, "marshal %v", filteredGlobs)
-			} else if err := rdb.HSet(ctx, SRS_RECORD_PATTERNS, "globs", string(b)).Err(); err != nil && err != redis.Nil {
+			} else if err := v.ds.Set(ctx, SRS_RECORD_PATTERNS, "globs", string(b)); err != nil {
 				return errors.Wrapf(err, "hset %v globs %v", SRS_RECORD_PATTERNS, string(b))
 			}
 
@@ -211,7 +211,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 				}
 			}
 
-			if err := rdb.HSet(ctx, SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile), PostCpDir).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile), PostCpDir); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_RECORD_PATTERNS, RecordPostProcessCpFile, PostCpDir)
 			}
 
@@ -248,7 +248,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 			}
 
 			var metadata M3u8VoDArtifact
-			if M3u8VoDMetadata, err := rdb.HGet(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid).Result(); err != nil && err != redis.Nil {
+			if M3u8VoDMetadata, err := v.ds.Get(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_RECORD_M3U8_ARTIFACT, uuid)
 			} else if M3u8VoDMetadata == "" {
 				return errors.Errorf("no record for uuid=%v", uuid)
@@ -282,7 +282,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 			}
 
 			// Remove HLS from list.
-			if err := rdb.HDel(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Delete(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid); err != nil {
 				return errors.Wrapf(err, "hdel %v %v", SRS_RECORD_M3U8_ARTIFACT, uuid)
 			}
 
@@ -351,11 +351,10 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			keys, cursor, err := rdb.HScan(ctx, SRS_RECORD_M3U8_ARTIFACT, 0, "*", 100).Result()
-			if err != nil && err != redis.Nil {
+			keys, err := v.ds.Select(ctx, SRS_RECORD_M3U8_ARTIFACT, &datasource.SelectOptions{Count: 100})
+			if err != nil {
 				return errors.Wrapf(err, "hscan %v 0 * 100", SRS_RECORD_M3U8_ARTIFACT)
 			}
-
 			files := []map[string]interface{}{}
 			for i := 0; i < len(keys); i += 2 {
 				var metadata M3u8VoDArtifact
@@ -384,7 +383,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 			}
 
 			ohttp.WriteData(ctx, w, r, files)
-			logger.Tf(ctx, "record files ok, cursor=%v, token=%vB", cursor, len(token))
+			logger.Tf(ctx, "record files ok, token=%vB", len(token))
 			return nil
 		}(); err != nil {
 			ohttp.WriteError(ctx, w, r, err)
@@ -402,7 +401,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 		}
 
 		var metadata M3u8VoDArtifact
-		if m3u8Metadata, err := rdb.HGet(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid).Result(); err != nil && err != redis.Nil {
+		if m3u8Metadata, err := v.ds.Get(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid); err != nil {
 			return errors.Wrapf(err, "hget %v %v", SRS_RECORD_M3U8_ARTIFACT, uuid)
 		} else if m3u8Metadata == "" {
 			return errors.Errorf("no m3u8 of uuid=%v", uuid)
@@ -464,7 +463,7 @@ func (v *RecordWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 		}
 
 		var metadata M3u8VoDArtifact
-		if m3u8Metadata, err := rdb.HGet(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid).Result(); err != nil && err != redis.Nil {
+		if m3u8Metadata, err := v.ds.Get(ctx, SRS_RECORD_M3U8_ARTIFACT, uuid); err != nil {
 			return errors.Wrapf(err, "hget %v %v", SRS_RECORD_M3U8_ARTIFACT, uuid)
 		} else if m3u8Metadata == "" {
 			return errors.Errorf("no m3u8 of uuid=%v", uuid)
@@ -604,7 +603,7 @@ func (v *RecordWorker) Start(ctx context.Context) error {
 	logger.Tf(ctx, "Record: start a worker")
 
 	// Load all objects from redis.
-	if objs, err := rdb.HGetAll(ctx, SRS_RECORD_M3U8_WORKING).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_RECORD_M3U8_WORKING); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_RECORD_M3U8_WORKING)
 	} else if len(objs) > 0 {
 		for m3u8URL, value := range objs {
@@ -639,7 +638,7 @@ func (v *RecordWorker) Start(ctx context.Context) error {
 
 		// Filter the stream by glob filters.
 		var globFilters []string
-		if globs, err := rdb.HGet(ctx, SRS_RECORD_PATTERNS, "globs").Result(); err != nil && err != redis.Nil {
+		if globs, err := v.ds.Get(ctx, SRS_RECORD_PATTERNS, "globs"); err != nil {
 			return errors.Wrapf(err, "hget %v globs", SRS_RECORD_PATTERNS)
 		} else if globs != "" {
 			if err := json.Unmarshal([]byte(globs), &globFilters); err != nil {
@@ -762,10 +761,9 @@ func (v *RecordM3u8Stream) deleteObject(ctx context.Context) error {
 	v.lock.Lock()
 	defer v.lock.Unlock()
 
-	if err := rdb.HDel(ctx, SRS_RECORD_M3U8_WORKING, v.M3u8URL).Err(); err != nil && err != redis.Nil {
+	if err := v.recordWorker.ds.Delete(ctx, SRS_RECORD_M3U8_WORKING, v.M3u8URL); err != nil {
 		return errors.Wrapf(err, "hdel %v %v", SRS_RECORD_M3U8_WORKING, v.M3u8URL)
 	}
-
 	return nil
 }
 
@@ -775,7 +773,7 @@ func (v *RecordM3u8Stream) saveObject(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal object")
-	} else if err = rdb.HSet(ctx, SRS_RECORD_M3U8_WORKING, v.M3u8URL, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.recordWorker.ds.Set(ctx, SRS_RECORD_M3U8_WORKING, v.M3u8URL, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_RECORD_M3U8_WORKING, v.M3u8URL, string(b))
 	}
 	return nil
@@ -787,7 +785,7 @@ func (v *RecordM3u8Stream) saveArtifact(ctx context.Context, artifact *M3u8VoDAr
 
 	if b, err := json.Marshal(artifact); err != nil {
 		return errors.Wrapf(err, "marshal %v", artifact.String())
-	} else if err = rdb.HSet(ctx, SRS_RECORD_M3U8_ARTIFACT, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.recordWorker.ds.Set(ctx, SRS_RECORD_M3U8_ARTIFACT, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_RECORD_M3U8_ARTIFACT, v.UUID, string(b))
 	}
 	return nil
@@ -860,7 +858,7 @@ func (v *RecordM3u8Stream) expired(ctx context.Context) bool {
 	}
 
 	var enabled bool
-	if all, err := rdb.HGet(ctx, SRS_RECORD_PATTERNS, "all").Result(); err == nil {
+	if all, err := v.recordWorker.ds.Get(ctx, SRS_RECORD_PATTERNS, "all"); err == nil {
 		enabled = all == "true"
 	}
 
@@ -882,7 +880,7 @@ func (v *RecordM3u8Stream) Initialize(ctx context.Context, r *RecordWorker) erro
 	logger.Tf(ctx, "record initialize url=%v, uuid=%v", v.M3u8URL, v.UUID)
 
 	// Try to load artifact from redis. The final artifact is VoD HLS object.
-	if value, err := rdb.HGet(ctx, SRS_RECORD_M3U8_ARTIFACT, v.UUID).Result(); err != nil && err != redis.Nil {
+	if value, err := v.recordWorker.ds.Get(ctx, SRS_RECORD_M3U8_ARTIFACT, v.UUID); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_RECORD_M3U8_ARTIFACT, v.UUID)
 	} else if value != "" {
 		artifact := &M3u8VoDArtifact{}
@@ -1070,11 +1068,10 @@ func (v *RecordM3u8Stream) finishM3u8(ctx context.Context) error {
 }
 
 func (v *RecordM3u8Stream) postProcessing(ctx context.Context) error {
-	processCpDir, err := rdb.HGet(ctx, SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile)).Result()
-	if err != nil && err != redis.Nil {
+	processCpDir, err := v.recordWorker.ds.Get(ctx, SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile))
+	if err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_RECORD_PATTERNS, string(RecordPostProcessCpFile))
 	}
-
 	if processCpDir == "" {
 		return nil
 	}

@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -22,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -625,7 +624,7 @@ func setEnvDefault(key, value string) {
 }
 
 // srsGenerateConfig is to build SRS configuration and reload SRS.
-func srsGenerateConfig(ctx context.Context) error {
+func srsGenerateConfig(ctx context.Context, ds datasource.Datasource) error {
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Build the High Performance HLS config.
 	hlsConf := []string{
@@ -633,7 +632,7 @@ func srsGenerateConfig(ctx context.Context) error {
 		"hls {",
 		"    enabled on;",
 	}
-	if hlsLowLatency, err := rdb.HGet(ctx, SRS_LL_HLS, "hlsLowLatency").Result(); err != nil && err != redis.Nil {
+	if hlsLowLatency, err := ds.Get(ctx, SRS_LL_HLS, "hlsLowLatency"); err != nil {
 		return errors.Wrapf(err, "hget %v hls", SRS_LL_HLS)
 	} else {
 		if hlsLowLatency != "true" {
@@ -656,7 +655,7 @@ func srsGenerateConfig(ctx context.Context) error {
 		"    hls_wait_keyframe on;",
 		"    hls_dispose 15;",
 	}...)
-	if noHlsCtx, err := rdb.HGet(ctx, SRS_HP_HLS, "noHlsCtx").Result(); err != nil && err != redis.Nil {
+	if noHlsCtx, err := ds.Get(ctx, SRS_HP_HLS, "noHlsCtx"); err != nil {
 		return errors.Wrapf(err, "hget %v hls", SRS_HP_HLS)
 	} else if noHlsCtx == "true" {
 		hlsConf = append(hlsConf, []string{
@@ -797,11 +796,11 @@ func srsGenerateConfig(ctx context.Context) error {
 }
 
 // nginxGenerateConfig is to build NGINX configuration and reload NGINX.
-func nginxGenerateConfig(ctx context.Context) error {
+func nginxGenerateConfig(ctx context.Context, ds datasource.Datasource) error {
 	////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 	// Build the SSL/TLS config.
 	sslConf := []string{}
-	if ssl, err := rdb.Get(ctx, SRS_HTTPS).Result(); err != nil && err != redis.Nil {
+	if ssl, err := ds.Get(ctx, SRS_HTTPS, ""); err != nil {
 		return errors.Wrapf(err, "get %v", SRS_HTTPS)
 	} else if ssl == "ssl" || ssl == "lets" {
 		sslConf = []string{

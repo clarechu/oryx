@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -15,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,8 +23,7 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 	"github.com/sashabaranov/go-openai"
 )
@@ -47,16 +45,19 @@ type TranscriptWorker struct {
 
 	// Got message from SRS, a new TS segment file is generated.
 	tsfiles chan *SrsOnHlsObject
+
+	ds datasource.Datasource
 }
 
-func NewTranscriptWorker() *TranscriptWorker {
+func NewTranscriptWorker(ds datasource.Datasource) *TranscriptWorker {
 	v := &TranscriptWorker{
 		// Message on_hls.
 		msgs: make(chan *SrsOnHlsMessage, 1024),
 		// TS files.
 		tsfiles: make(chan *SrsOnHlsObject, 1024),
+		ds:      ds,
 	}
-	v.task = NewTranscriptTask()
+	v.task = NewTranscriptTask(ds)
 	v.task.transcriptWorker = v
 	return v
 }
@@ -80,7 +81,7 @@ func (v *TranscriptWorker) Handle(ctx context.Context, handler *http.ServeMux) e
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			config := NewTranscriptConfig()
+			config := NewTranscriptConfig(v.ds)
 			if err := config.Load(ctx); err != nil {
 				return errors.Wrapf(err, "load config")
 			}
@@ -1016,11 +1017,11 @@ func (v *TranscriptWorker) Start(ctx context.Context) error {
 	logger.Tf(ctx, "transcript start a worker")
 
 	// Load task from redis and continue to run the task.
-	if objs, err := rdb.HGetAll(ctx, SRS_TRANSCRIPT_TASK).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_TRANSCRIPT_TASK); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_TRANSCRIPT_TASK)
 	} else if len(objs) != 1 {
 		// Only support one task right now.
-		if err = rdb.Del(ctx, SRS_TRANSCRIPT_TASK).Err(); err != nil && err != redis.Nil {
+		if err = v.ds.DeleteAll(ctx, SRS_TRANSCRIPT_TASK); err != nil {
 			return errors.Wrapf(err, "del %v", SRS_TRANSCRIPT_TASK)
 		}
 	} else {
@@ -1223,11 +1224,13 @@ type TranscriptConfig struct {
 	EnableOverlay bool `json:"overlayEnabled"`
 	// Whether enable WebVTT subtitle.
 	EnableWebVTT bool `json:"webvttEnabled"`
+	ds           datasource.Datasource
 }
 
-func NewTranscriptConfig() *TranscriptConfig {
+func NewTranscriptConfig(ds datasource.Datasource) *TranscriptConfig {
 	return &TranscriptConfig{
 		All: false, EnableOverlay: true, EnableWebVTT: true,
+		ds: ds,
 	}
 }
 
@@ -1238,7 +1241,7 @@ func (v TranscriptConfig) String() string {
 }
 
 func (v *TranscriptConfig) Load(ctx context.Context) error {
-	if b, err := rdb.HGet(ctx, SRS_TRANSCRIPT_CONFIG, "global").Result(); err != nil && err != redis.Nil {
+	if b, err := v.ds.Get(ctx, SRS_TRANSCRIPT_CONFIG, "global"); err != nil {
 		return errors.Wrapf(err, "hget %v global", SRS_TRANSCRIPT_CONFIG)
 	} else if len(b) > 0 {
 		if err := json.Unmarshal([]byte(b), v); err != nil {
@@ -1251,7 +1254,7 @@ func (v *TranscriptConfig) Load(ctx context.Context) error {
 func (v *TranscriptConfig) Save(ctx context.Context) error {
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal conf %v", v)
-	} else if err := rdb.HSet(ctx, SRS_TRANSCRIPT_CONFIG, "global", string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err := v.ds.Set(ctx, SRS_TRANSCRIPT_CONFIG, "global", string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v global %v", SRS_TRANSCRIPT_CONFIG, string(b))
 	}
 	return nil
@@ -1493,9 +1496,10 @@ type TranscriptTask struct {
 
 	// To protect the common fields.
 	lock sync.Mutex
+	ds   datasource.Datasource
 }
 
-func NewTranscriptTask() *TranscriptTask {
+func NewTranscriptTask(ds datasource.Datasource) *TranscriptTask {
 	return &TranscriptTask{
 		// Generate a UUID for task.
 		UUID: uuid.NewString(),
@@ -1511,6 +1515,7 @@ func NewTranscriptTask() *TranscriptTask {
 		signalPersistence: make(chan bool, 1),
 		// Create new stream signal.
 		signalNewStream: make(chan *SrsStream, 1),
+		ds:              ds,
 	}
 }
 
@@ -1618,7 +1623,7 @@ func (v *TranscriptTask) WatchNewStream(ctx context.Context) error {
 	}
 
 	selectActiveStream := func() (*SrsStream, error) {
-		streams, err := rdb.HGetAll(ctx, SRS_STREAM_ACTIVE).Result()
+		streams, err := v.ds.SelectAll(ctx, SRS_STREAM_ACTIVE)
 		if err != nil {
 			return nil, errors.Wrapf(err, "hgetall %v", SRS_STREAM_ACTIVE)
 		}
@@ -2101,7 +2106,7 @@ func (v *TranscriptTask) reset(ctx context.Context) error {
 		v.PreviousAsrText = ""
 
 		// Remove previous task from redis.
-		if err := rdb.HDel(ctx, SRS_TRANSCRIPT_TASK, v.UUID).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Delete(ctx, SRS_TRANSCRIPT_TASK, v.UUID); err != nil {
 			return errors.Wrapf(err, "hdel %v %v", SRS_TRANSCRIPT_TASK, v.UUID)
 		}
 
@@ -2190,7 +2195,7 @@ func (v *TranscriptTask) saveTask(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal %v", v.String())
-	} else if err = rdb.HSet(ctx, SRS_TRANSCRIPT_TASK, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.ds.Set(ctx, SRS_TRANSCRIPT_TASK, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_TRANSCRIPT_TASK, v.UUID, string(b))
 	}
 

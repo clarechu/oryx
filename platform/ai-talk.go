@@ -1,5 +1,3 @@
-//go:build linux
-
 package main
 
 import (
@@ -14,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"regexp"
 	"strings"
 	"sync"
@@ -26,8 +25,6 @@ import (
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
 	"github.com/sashabaranov/go-openai"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
 )
 
 var talkServer *TalkServer
@@ -1212,11 +1209,13 @@ type TalkServer struct {
 	stages []*Stage
 	// The lock to protect fields.
 	lock sync.Mutex
+	ds   datasource.Datasource
 }
 
-func NewTalkServer() *TalkServer {
+func NewTalkServer(ds datasource.Datasource) *TalkServer {
 	return &TalkServer{
 		stages: []*Stage{},
+		ds:     ds,
 	}
 }
 
@@ -1384,7 +1383,7 @@ func (v *TTSWorker) SubmitSegment(ctx context.Context, stage *Stage, sreq *Stage
 	}()
 }
 
-func handleAITalkService(ctx context.Context, handler *http.ServeMux) error {
+func handleAITalkService(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) error {
 	// TODO: FIXME: Should use relative path, never expose absolute path to client.
 	aiTalkWorkDir = path.Join(conf.Pwd, "containers/data/ai-talk")
 	aiTalkExampleDir = path.Join(conf.Pwd, "containers/conf")
@@ -1404,7 +1403,7 @@ func handleAITalkService(ctx context.Context, handler *http.ServeMux) error {
 			// Store the room, as we modify the stage UUID of room.
 			if b, err := json.Marshal(room); err != nil {
 				return nil, errors.Wrapf(err, "marshal room")
-			} else if err := rdb.HSet(ctx, SRS_LIVE_ROOM, room.UUID, string(b)).Err(); err != nil {
+			} else if err := ds.Set(ctx, SRS_LIVE_ROOM, room.UUID, string(b)); err != nil {
 				return nil, errors.Wrapf(err, "hset %v %v %v", SRS_LIVE_ROOM, room.UUID, string(b))
 			}
 
@@ -1460,7 +1459,7 @@ func handleAITalkService(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			var room SrsLiveRoom
-			if r0, err := rdb.HGet(ctx, SRS_LIVE_ROOM, roomUUID).Result(); err != nil && err != redis.Nil {
+			if r0, err := ds.Get(ctx, SRS_LIVE_ROOM, roomUUID); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_LIVE_ROOM, roomUUID)
 			} else if r0 == "" {
 				return errors.Errorf("live room %v not exists", roomUUID)
@@ -1928,7 +1927,7 @@ func handleAITalkService(ctx context.Context, handler *http.ServeMux) error {
 			// Note that when verifying stage, there may be no stage exists, so we must fetch the room token
 			// from redis, should never try to use cached token from stage.
 			var room SrsLiveRoom
-			if r0, err := rdb.HGet(ctx, SRS_LIVE_ROOM, roomUUID).Result(); err != nil && err != redis.Nil {
+			if r0, err := ds.Get(ctx, SRS_LIVE_ROOM, roomUUID); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_LIVE_ROOM, roomUUID)
 			} else if r0 == "" {
 				return errors.Errorf("live room %v not exists", roomUUID)

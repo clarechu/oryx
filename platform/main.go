@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -16,6 +14,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"platform/datasource"
 	"runtime"
 	"strings"
 	"syscall"
@@ -23,8 +22,7 @@ import (
 
 	"github.com/ossrs/go-oryx-lib/errors"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
@@ -33,7 +31,11 @@ import (
 var conf *Config
 
 func init() {
-	certManager = NewCertManager()
+	ds, err := datasource.NewDatasource(os.Getenv("DATASOURCE_TYPE"))
+	if err != nil {
+		panic(err)
+	}
+	certManager = NewCertManager(ds)
 	conf = NewConfig()
 
 	// We use polling to update some fast cache, for example, LLHLS config.
@@ -171,16 +173,21 @@ func doMain(ctx context.Context) error {
 	if err := InitRdb(); err != nil {
 		return errors.Wrapf(err, "init rdb")
 	}
-	logger.Tf(ctx, "init rdb(redis client) ok")
+
+	ds, err := datasource.NewDatasource(os.Getenv("DATASOURCE_TYPE"))
+	if err != nil {
+		return err
+	}
+	logger.Tf(ctx, "init datasource(redis client) ok")
 
 	// For platform, we should initOS after redis.
 	// Setup the OS for redis, which should never depends on redis.
-	if err := initOS(ctx); err != nil {
+	if err := initOS(ctx, ds); err != nil {
 		return errors.Wrapf(err, "init os")
 	}
 
 	// We must initialize the platform after redis is ready.
-	if err := initPlatform(ctx); err != nil {
+	if err := initPlatform(ctx, ds); err != nil {
 		return errors.Wrapf(err, "init platform")
 	}
 
@@ -191,99 +198,99 @@ func doMain(ctx context.Context) error {
 	logger.Tf(ctx, "initialize platform region=%v, registry=%v, version=%v", conf.Region, conf.Registry, version)
 
 	// Create candidate worker for resolving domain to ip.
-	candidateWorker = NewCandidateWorker()
+	candidateWorker = NewCandidateWorker(ds)
 	defer candidateWorker.Close()
 	if err := candidateWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start candidate worker")
 	}
 
 	// Create callback worker.
-	callbackWorker = NewCallbackWorker()
+	callbackWorker = NewCallbackWorker(ds)
 	defer callbackWorker.Close()
 	if err := callbackWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start callback worker")
 	}
 
 	// Create transcript worker for transcription.
-	transcriptWorker = NewTranscriptWorker()
+	transcriptWorker = NewTranscriptWorker(ds)
 	defer transcriptWorker.Close()
 	if err := transcriptWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start transcript worker")
 	}
 
 	// Create OCR worker for OCR service.
-	ocrWorker = NewOCRWorker()
+	ocrWorker = NewOCRWorker(ds)
 	defer ocrWorker.Close()
 	if err := ocrWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start OCR worker")
 	}
 
 	// Create AI Talk worker for live room.
-	talkServer = NewTalkServer()
+	talkServer = NewTalkServer(ds)
 	defer talkServer.Close()
 
 	// Create AI Dubbing server for VoD translation.
-	dubbingServer = NewDubbingServer()
+	dubbingServer = NewDubbingServer(ds)
 	defer dubbingServer.Close()
 
 	// Create transcode worker for transcoding.
-	transcodeWorker = NewTranscodeWorker()
+	transcodeWorker = NewTranscodeWorker(ds)
 	defer transcodeWorker.Close()
 	if err := transcodeWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start transcode worker")
 	}
 
 	// Create worker for RECORD, covert live stream to local file.
-	recordWorker = NewRecordWorker()
+	recordWorker = NewRecordWorker(ds)
 	defer recordWorker.Close()
 	if err := recordWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start record worker")
 	}
 
 	// Create worker for DVR, covert live stream to local file.
-	dvrWorker = NewDvrWorker()
+	dvrWorker = NewDvrWorker(ds)
 	defer dvrWorker.Close()
 	if err := dvrWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start dvr worker")
 	}
 
 	// Create worker for VoD, covert live stream to local file.
-	vodWorker = NewVodWorker()
+	vodWorker = NewVodWorker(ds)
 	defer vodWorker.Close()
 	if err := vodWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start vod worker")
 	}
 
 	// Create worker for forwarding.
-	forwardWorker = NewForwardWorker()
+	forwardWorker = NewForwardWorker(ds)
 	defer forwardWorker.Close()
 	if err := forwardWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start forward worker")
 	}
 
 	// Create worker for vLive.
-	vLiveWorker = NewVLiveWorker()
+	vLiveWorker = NewVLiveWorker(ds)
 	defer vLiveWorker.Close()
 	if err := vLiveWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start vLive worker")
 	}
 
 	// Create worker for IP camera.
-	cameraWorker = NewCameraWorker()
+	cameraWorker = NewCameraWorker(ds)
 	defer cameraWorker.Close()
 	if err := cameraWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start IP camera worker")
 	}
 
 	// Create worker for crontab.
-	crontabWorker = NewCrontabWorker()
+	crontabWorker = NewCrontabWorker(ds)
 	defer crontabWorker.Close()
 	if err := crontabWorker.Start(ctx); err != nil {
 		return errors.Wrapf(err, "start crontab worker")
 	}
 
 	// Run HTTP service.
-	httpService := NewHTTPService()
+	httpService := NewHTTPService(ds)
 	defer httpService.Close()
 	if err := httpService.Run(ctx); err != nil {
 		return errors.Wrapf(err, "start http service")
@@ -320,9 +327,9 @@ func initMgmtOS(ctx context.Context) (err error) {
 }
 
 // Initialize the source for redis, note that we don't change the env.
-func initOS(ctx context.Context) (err error) {
+func initOS(ctx context.Context, ds datasource.Datasource) (err error) {
 	// Create api secret if not exists, see setupApiSecret
-	if token, err := rdb.HGet(ctx, SRS_PLATFORM_SECRET, "token").Result(); err != nil && err != redis.Nil {
+	if token, err := ds.Get(ctx, SRS_PLATFORM_SECRET, "token"); err != nil {
 		return errors.Wrapf(err, "hget %v token", SRS_PLATFORM_SECRET)
 	} else if token == "" {
 		token = envApiSecret()
@@ -330,12 +337,12 @@ func initOS(ctx context.Context) (err error) {
 			token = fmt.Sprintf("srs-v2-%v", strings.ReplaceAll(uuid.NewString(), "-", ""))
 		}
 
-		if err = rdb.HSet(ctx, SRS_PLATFORM_SECRET, "token", token).Err(); err != nil {
+		if err = ds.Set(ctx, SRS_PLATFORM_SECRET, "token", token); err != nil {
 			return errors.Wrapf(err, "hset %v token %v", SRS_PLATFORM_SECRET, token)
 		}
 
 		update := time.Now().Format(time.RFC3339)
-		if err = rdb.HSet(ctx, SRS_PLATFORM_SECRET, "update", update).Err(); err != nil {
+		if err = ds.Set(ctx, SRS_PLATFORM_SECRET, "update", update); err != nil {
 			return errors.Wrapf(err, "hset %v update %v", SRS_PLATFORM_SECRET, update)
 		}
 		logger.Tf(ctx, "Platform update api secret, token=%vB, at=%v", len(token), update)
@@ -344,7 +351,7 @@ func initOS(ctx context.Context) (err error) {
 	// For platform, we must use the secret to access API of mgmt.
 	// Query the api secret from redis, cache it to env.
 	if envApiSecret() == "" {
-		if token, err := rdb.HGet(ctx, SRS_PLATFORM_SECRET, "token").Result(); err != nil && err != redis.Nil {
+		if token, err := ds.Get(ctx, SRS_PLATFORM_SECRET, "token"); err != nil {
 			return errors.Wrapf(err, "hget %v token", SRS_PLATFORM_SECRET)
 		} else {
 			os.Setenv("SRS_PLATFORM_SECRET", token)
@@ -353,36 +360,36 @@ func initOS(ctx context.Context) (err error) {
 	}
 
 	// Load the platform from redis, initialized by mgmt.
-	if cloud, err := rdb.HGet(ctx, SRS_TENCENT_LH, "cloud").Result(); err != nil && err != redis.Nil {
+	if cloud, err := ds.Get(ctx, SRS_TENCENT_LH, "cloud"); err != nil {
 		return errors.Wrapf(err, "hget %v cloud", SRS_TENCENT_LH)
 	} else if cloud == "" || conf.Cloud != cloud {
-		if err = rdb.HSet(ctx, SRS_TENCENT_LH, "cloud", conf.Cloud).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_TENCENT_LH, "cloud", conf.Cloud); err != nil {
 			return errors.Wrapf(err, "hset %v cloud %v", SRS_TENCENT_LH, conf.Cloud)
 		}
 		logger.Tf(ctx, "Update cloud=%v", conf.Cloud)
 	}
 
 	// Load the region first, because it never changed.
-	if region, err := rdb.HGet(ctx, SRS_TENCENT_LH, "region").Result(); err != nil && err != redis.Nil {
+	if region, err := ds.Get(ctx, SRS_TENCENT_LH, "region"); err != nil {
 		return errors.Wrapf(err, "hget %v region", SRS_TENCENT_LH)
 	} else if region == "" || conf.Region != region {
-		if err = rdb.HSet(ctx, SRS_TENCENT_LH, "region", conf.Region).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_TENCENT_LH, "region", conf.Region); err != nil {
 			return errors.Wrapf(err, "hset %v region %v", SRS_TENCENT_LH, conf.Region)
 		}
 		logger.Tf(ctx, "Update region=%v", conf.Region)
 	}
 
 	// Always update the source, because it might change.
-	if source, err := rdb.HGet(ctx, SRS_TENCENT_LH, "source").Result(); err != nil && err != redis.Nil {
+	if source, err := ds.Get(ctx, SRS_TENCENT_LH, "source"); err != nil {
 		return errors.Wrapf(err, "hget %v source", SRS_TENCENT_LH)
 	} else if source == "" || conf.Source != source {
-		if err = rdb.HSet(ctx, SRS_TENCENT_LH, "source", conf.Source).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_TENCENT_LH, "source", conf.Source); err != nil {
 			return errors.Wrapf(err, "hset %v source %v", SRS_TENCENT_LH, conf.Source)
 		}
 		logger.Tf(ctx, "Update source=%v", conf.Source)
 	}
 
-	if registry, err := rdb.HGet(ctx, SRS_TENCENT_LH, "registry").Result(); err != nil && err != redis.Nil {
+	if registry, err := ds.Get(ctx, SRS_TENCENT_LH, "registry"); err != nil {
 		return errors.Wrapf(err, "hget %v registry", SRS_TENCENT_LH)
 	} else if registry != "" {
 		conf.Registry = registry
@@ -392,17 +399,17 @@ func initOS(ctx context.Context) (err error) {
 	if platform, err := discoverPlatform(ctx, conf.Cloud); err != nil {
 		return errors.Wrapf(err, "discover platform by cloud=%v", conf.Cloud)
 	} else {
-		if err = rdb.HSet(ctx, SRS_TENCENT_LH, "platform", platform).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_TENCENT_LH, "platform", platform); err != nil {
 			return errors.Wrapf(err, "hset %v platform %v", SRS_TENCENT_LH, platform)
 		}
 		logger.Tf(ctx, "Update platform=%v", platform)
 	}
 
 	// Always update the registry, because it might change.
-	if registry, err := rdb.HGet(ctx, SRS_TENCENT_LH, "registry").Result(); err != nil && err != redis.Nil {
+	if registry, err := ds.Get(ctx, SRS_TENCENT_LH, "registry"); err != nil {
 		return errors.Wrapf(err, "hget %v registry", SRS_TENCENT_LH)
 	} else if registry == "" || conf.Registry != registry {
-		if err = rdb.HSet(ctx, SRS_TENCENT_LH, "registry", conf.Registry).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_TENCENT_LH, "registry", conf.Registry); err != nil {
 			return errors.Wrapf(err, "hset %v registry %v", SRS_TENCENT_LH, conf.Registry)
 		}
 		logger.Tf(ctx, "Update registry=%v", conf.Registry)
@@ -425,7 +432,7 @@ func initOS(ctx context.Context) (err error) {
 }
 
 // Initialize the platform before thread run.
-func initPlatform(ctx context.Context) error {
+func initPlatform(ctx context.Context, ds datasource.Datasource) error {
 	// For Darwin, append the search PATH for docker.
 	// Note that we should set the PATH env, not the exec.Cmd.Env.
 	// Note that it depends on conf.IsDarwin, so it's unavailable util initOS.
@@ -452,23 +459,23 @@ func initPlatform(ctx context.Context) error {
 
 	// Run only once for a special version.
 	bootRelease := "v2023-r30"
-	if firstRun, err := rdb.HGet(ctx, SRS_FIRST_BOOT, bootRelease).Result(); err != nil && err != redis.Nil {
+	if firstRun, err := ds.Get(ctx, SRS_FIRST_BOOT, bootRelease); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_FIRST_BOOT, bootRelease)
 	} else if firstRun == "" {
 		logger.Tf(ctx, "boot setup, v=%v, key=%v", bootRelease, SRS_FIRST_BOOT)
 
 		// Generate the dynamic config for NGINX.
-		if err := nginxGenerateConfig(ctx); err != nil {
+		if err := nginxGenerateConfig(ctx, ds); err != nil {
 			return errors.Wrapf(err, "nginx config and reload")
 		}
 
 		// Generate the dynamic config for SRS.
-		if err := srsGenerateConfig(ctx); err != nil {
+		if err := srsGenerateConfig(ctx, ds); err != nil {
 			return errors.Wrapf(err, "srs config and reload")
 		}
 
 		// Run once, record in redis.
-		if err := rdb.HSet(ctx, SRS_FIRST_BOOT, bootRelease, 1).Err(); err != nil {
+		if err := ds.Set(ctx, SRS_FIRST_BOOT, bootRelease, "1"); err != nil {
 			return errors.Wrapf(err, "hset %v %v 1", SRS_FIRST_BOOT, bootRelease)
 		}
 
@@ -481,35 +488,35 @@ func initPlatform(ctx context.Context) error {
 	go refreshLatestVersion(ctx)
 
 	// Disable srs-dev, only enable srs-server.
-	if srsDevEnabled, err := rdb.HGet(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName).Result(); err != nil && err != redis.Nil {
+	if srsDevEnabled, err := ds.Get(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_CONTAINER_DISABLED, srsDevDockerName)
-	} else if srsEnabled, err := rdb.HGet(ctx, SRS_CONTAINER_DISABLED, srsDockerName).Result(); err != nil && err != redis.Nil {
+	} else if srsEnabled, err := ds.Get(ctx, SRS_CONTAINER_DISABLED, srsDockerName); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_CONTAINER_DISABLED, srsDockerName)
 	} else if srsDevEnabled != "true" && srsEnabled == "true" {
-		r0 := rdb.HSet(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName, "true").Err()
-		r1 := rdb.HSet(ctx, SRS_CONTAINER_DISABLED, srsDockerName, "false").Err()
+		r0 := ds.Set(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName, "true")
+		r1 := ds.Set(ctx, SRS_CONTAINER_DISABLED, srsDockerName, "false")
 		logger.Wf(ctx, "Disable srs-dev r0=%v, only enable srs-server r1=%v", r0, r1)
 	}
 
 	// For SRS, if release enabled, disable dev automatically.
-	if srsReleaseDisabled, err := rdb.HGet(ctx, SRS_CONTAINER_DISABLED, srsDockerName).Result(); err != nil && err != redis.Nil {
+	if srsReleaseDisabled, err := ds.Get(ctx, SRS_CONTAINER_DISABLED, srsDockerName); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_CONTAINER_DISABLED, srsDockerName)
-	} else if srsDevDisabled, err := rdb.HGet(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName).Result(); err != nil && err != redis.Nil {
+	} else if srsDevDisabled, err := ds.Get(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_CONTAINER_DISABLED, srsDevDockerName)
 	} else if srsReleaseDisabled != "true" && srsDevDisabled != "true" {
-		r0 := rdb.HSet(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName, true).Err()
+		r0 := ds.Set(ctx, SRS_CONTAINER_DISABLED, srsDevDockerName, "true")
 		logger.Tf(ctx, "disable srs dev for release enabled, r0=%v", r0)
 	}
 
 	// Setup the publish secret for first run.
-	if publish, err := rdb.HGet(ctx, SRS_AUTH_SECRET, "pubSecret").Result(); err != nil && err != redis.Nil {
+	if publish, err := ds.Get(ctx, SRS_AUTH_SECRET, "pubSecret"); err != nil {
 		return errors.Wrapf(err, "hget %v pubSecret", SRS_AUTH_SECRET)
 	} else if publish == "" {
 		publish = strings.ReplaceAll(uuid.NewString(), "-", "")
-		if err = rdb.HSet(ctx, SRS_AUTH_SECRET, "pubSecret", publish).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_AUTH_SECRET, "pubSecret", publish); err != nil {
 			return errors.Wrapf(err, "hset %v pubSecret %v", SRS_AUTH_SECRET, publish)
 		}
-		if err = rdb.Set(ctx, SRS_SECRET_PUBLISH, publish, 0).Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_SECRET_PUBLISH, "", publish); err != nil {
 			return errors.Wrapf(err, "set %v %v", SRS_SECRET_PUBLISH, publish)
 		}
 	}
@@ -523,12 +530,12 @@ func initPlatform(ctx context.Context) error {
 		{"SRS_DVR_M3U8_METADATA", SRS_DVR_M3U8_ARTIFACT},
 		{"SRS_VOD_M3U8_METADATA", SRS_VOD_M3U8_ARTIFACT},
 	} {
-		pv, _ := rdb.HLen(ctx, migrate.PVK).Result()
-		cv, _ := rdb.HLen(ctx, migrate.CVK).Result()
+		pv, _ := ds.Count(ctx, migrate.PVK)
+		cv, _ := ds.Count(ctx, migrate.CVK)
 		if pv > 0 && cv == 0 {
-			if vs, err := rdb.HGetAll(ctx, migrate.PVK).Result(); err == nil {
+			if vs, err := ds.SelectAll(ctx, migrate.PVK); err == nil {
 				for k, v := range vs {
-					_ = rdb.HSet(ctx, migrate.CVK, k, v)
+					_ = ds.Set(ctx, migrate.CVK, k, v)
 				}
 				logger.Tf(ctx, "migrate %v to %v with %v keys", migrate.PVK, migrate.CVK, len(vs))
 			}
@@ -536,20 +543,20 @@ func initPlatform(ctx context.Context) error {
 	}
 
 	// Cancel upgrading.
-	if upgrading, err := rdb.HGet(ctx, SRS_UPGRADING, "upgrading").Result(); err != nil && err != redis.Nil {
+	if upgrading, err := ds.Get(ctx, SRS_UPGRADING, "upgrading"); err != nil {
 		return errors.Wrapf(err, "hget %v upgrading", SRS_UPGRADING)
 	} else if upgrading == "1" {
-		if err = rdb.HSet(ctx, SRS_UPGRADING, "upgrading", "0").Err(); err != nil && err != redis.Nil {
+		if err = ds.Set(ctx, SRS_UPGRADING, "upgrading", "0"); err != nil {
 			return errors.Wrapf(err, "hset %v upgrading 0", SRS_UPGRADING)
 		}
 	}
 
 	// Initialize the node id.
-	if nid, err := rdb.HGet(ctx, SRS_TENCENT_LH, "node").Result(); err != nil && err != redis.Nil {
+	if nid, err := ds.Get(ctx, SRS_TENCENT_LH, "node"); err != nil {
 		return errors.Wrapf(err, "hget %v node", SRS_TENCENT_LH)
 	} else if nid == "" {
 		nid = uuid.NewString()
-		if err = rdb.HSet(ctx, SRS_TENCENT_LH, "node", nid).Err(); err != nil {
+		if err = ds.Set(ctx, SRS_TENCENT_LH, "node", nid); err != nil {
 			return errors.Wrapf(err, "hset %v node %v", SRS_TENCENT_LH, nid)
 		}
 		logger.Tf(ctx, "Update node nid=%v", nid)

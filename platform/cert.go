@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -22,10 +20,10 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/ossrs/go-oryx-lib/errors"
 	"github.com/ossrs/go-oryx-lib/logger"
 )
@@ -41,10 +39,12 @@ type CertManager struct {
 
 	// certFileLock is used to lock the cert file nginx.key and nginx.crt.
 	certFileLock sync.Mutex
+	ds           datasource.Datasource
 }
 
-func NewCertManager() *CertManager {
+func NewCertManager(ds datasource.Datasource) *CertManager {
 	return &CertManager{
+		ds:                    ds,
 		httpCertificateReload: make(chan bool, 1),
 	}
 }
@@ -129,11 +129,10 @@ func (v *CertManager) createSelfSignCertificate(ctx context.Context) error {
 		return errors.Wrapf(err, "updateSslFiles key=%vB, crt=%vB", len(key), len(crt))
 	}
 
-	if err := rdb.Set(ctx, SRS_HTTPS, "ssl", 0).Err(); err != nil && err != redis.Nil {
+	if err := v.ds.Set(ctx, SRS_HTTPS, "", "ssl"); err != nil {
 		return errors.Wrapf(err, "set %v %v", SRS_HTTPS, "ssl")
 	}
-
-	if err := nginxGenerateConfig(ctx); err != nil {
+	if err := nginxGenerateConfig(ctx, v.ds); err != nil {
 		return errors.Wrapf(err, "nginx config and reload")
 	}
 	logger.T(ctx, "cert: update self-signed certificate ok, key=%vB, crt=%vB", len(key), len(crt))
@@ -317,17 +316,16 @@ func (v *CertManager) renewLetsEncrypt(ctx context.Context, domain string) error
 }
 
 func (v *CertManager) refreshSSLCert(ctx context.Context) error {
-	provider, err := rdb.Get(ctx, SRS_HTTPS).Result()
-	if err != nil && err != redis.Nil {
+	provider, err := v.ds.Get(ctx, SRS_HTTPS, "")
+	if err != nil {
 		return err
 	}
 	if provider != "lets" {
 		logger.Tf(ctx, "cert: ignore ssl provider %v", provider)
 		return nil
 	}
-
-	domain, err := rdb.Get(ctx, SRS_HTTPS_DOMAIN).Result()
-	if err != nil && err != redis.Nil {
+	domain, err := v.ds.Get(ctx, SRS_HTTPS_DOMAIN, "")
+	if err != nil {
 		return err
 	}
 	if domain == "" {
@@ -341,7 +339,7 @@ func (v *CertManager) refreshSSLCert(ctx context.Context) error {
 		logger.Tf(ctx, "cert: renew ssl cert ok")
 	}
 
-	if err := nginxGenerateConfig(ctx); err != nil {
+	if err := nginxGenerateConfig(ctx, v.ds); err != nil {
 		return errors.Wrapf(err, "nginx config and reload")
 	}
 

@@ -2,12 +2,11 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
 	"context"
+	"platform/datasource"
 	"sync"
 	"time"
 
@@ -19,10 +18,13 @@ var crontabWorker *CrontabWorker
 
 type CrontabWorker struct {
 	wg sync.WaitGroup
+	ds datasource.Datasource
 }
 
-func NewCrontabWorker() *CrontabWorker {
-	return &CrontabWorker{}
+func NewCrontabWorker(ds datasource.Datasource) *CrontabWorker {
+	return &CrontabWorker{
+		ds: ds,
+	}
 }
 
 func (v *CrontabWorker) Close() error {

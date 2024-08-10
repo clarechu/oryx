@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -12,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"platform/datasource"
 	"sort"
 	"strings"
 	"sync"
@@ -22,8 +21,7 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 )
 
@@ -35,10 +33,13 @@ type ForwardWorker struct {
 
 	// The tasks we have started to forward streams,, key is platform in string, value is *ForwardTask.
 	tasks sync.Map
+	ds    datasource.Datasource
 }
 
-func NewForwardWorker() *ForwardWorker {
-	return &ForwardWorker{}
+func NewForwardWorker(ds datasource.Datasource) *ForwardWorker {
+	return &ForwardWorker{
+		ds: ds,
+	}
 }
 
 func (v *ForwardWorker) GetTask(platform string) *ForwardTask {
@@ -96,7 +97,7 @@ func (v *ForwardWorker) Handle(ctx context.Context, handler *http.ServeMux) erro
 
 			if action == "update" {
 				var targetConf ForwardConfigure
-				if config, err := rdb.HGet(ctx, SRS_FORWARD_CONFIG, userConf.Platform).Result(); err != nil && err != redis.Nil {
+				if config, err := v.ds.Get(ctx, SRS_FORWARD_CONFIG, userConf.Platform); err != nil {
 					return errors.Wrapf(err, "hget %v %v", SRS_FORWARD_CONFIG, userConf.Platform)
 				} else {
 					if config != "" {
@@ -108,7 +109,7 @@ func (v *ForwardWorker) Handle(ctx context.Context, handler *http.ServeMux) erro
 						return errors.Wrapf(err, "update %v with %v", targetConf.String(), userConf.String())
 					} else if newB, err := json.Marshal(&targetConf); err != nil {
 						return errors.Wrapf(err, "marshal %v", targetConf.String())
-					} else if err = rdb.HSet(ctx, SRS_FORWARD_CONFIG, userConf.Platform, string(newB)).Err(); err != nil && err != redis.Nil {
+					} else if err = v.ds.Set(ctx, SRS_FORWARD_CONFIG, userConf.Platform, string(newB)); err != nil {
 						return errors.Wrapf(err, "hset %v %v %v", SRS_FORWARD_CONFIG, userConf.Platform, string(newB))
 					}
 				}
@@ -125,7 +126,7 @@ func (v *ForwardWorker) Handle(ctx context.Context, handler *http.ServeMux) erro
 				return nil
 			} else {
 				confObjs := make(map[string]*ForwardConfigure)
-				if configs, err := rdb.HGetAll(ctx, SRS_FORWARD_CONFIG).Result(); err != nil && err != redis.Nil {
+				if configs, err := v.ds.SelectAll(ctx, SRS_FORWARD_CONFIG); err != nil {
 					return errors.Wrapf(err, "hgetall %v", SRS_FORWARD_CONFIG)
 				} else {
 					for k, v := range configs {
@@ -165,7 +166,7 @@ func (v *ForwardWorker) Handle(ctx context.Context, handler *http.ServeMux) erro
 			}
 
 			res := make([]map[string]interface{}, 0)
-			if configItems, err := rdb.HGetAll(ctx, SRS_FORWARD_CONFIG).Result(); err != nil && err != redis.Nil {
+			if configItems, err := v.ds.SelectAll(ctx, SRS_FORWARD_CONFIG); err != nil {
 				return errors.Wrapf(err, "hgetall %v", SRS_FORWARD_CONFIG)
 			} else if len(configItems) > 0 {
 				for k, configItem := range configItems {
@@ -234,7 +235,7 @@ func (v *ForwardWorker) Start(ctx context.Context) error {
 	logger.Tf(ctx, "forward start a worker")
 
 	// Load tasks from redis and force to kill all.
-	if objs, err := rdb.HGetAll(ctx, SRS_FORWARD_TASK).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_FORWARD_TASK); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_FORWARD_TASK)
 	} else if len(objs) > 0 {
 		for uuid, obj := range objs {
@@ -249,16 +250,16 @@ func (v *ForwardWorker) Start(ctx context.Context) error {
 				task.cleanup(ctx)
 			}
 		}
-
-		if err = rdb.Del(ctx, SRS_FORWARD_TASK).Err(); err != nil && err != redis.Nil {
+		if err = v.ds.DeleteAll(ctx, SRS_FORWARD_TASK); err != nil {
 			return errors.Wrapf(err, "del %v", SRS_FORWARD_TASK)
 		}
 	}
 
 	// Load all configurations from redis.
 	loadTasks := func() error {
-		configItems, err := rdb.HGetAll(ctx, SRS_FORWARD_CONFIG).Result()
-		if err != nil && err != redis.Nil {
+		//configItems, err := rdb.HGetAll(ctx, SRS_FORWARD_CONFIG).Result()
+		configItems, err := v.ds.SelectAll(ctx, SRS_FORWARD_CONFIG)
+		if err != nil {
 			return errors.Wrapf(err, "hgetall %v", SRS_FORWARD_CONFIG)
 		}
 		if len(configItems) == 0 {
@@ -400,6 +401,8 @@ type ForwardTask struct {
 
 	// To protect the fields.
 	lock sync.Mutex
+	// Datasource
+	ds datasource.Datasource
 }
 
 func (v *ForwardTask) String() string {
@@ -414,7 +417,7 @@ func (v *ForwardTask) saveTask(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal %v", v.String())
-	} else if err = rdb.HSet(ctx, SRS_FORWARD_TASK, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.ds.Set(ctx, SRS_FORWARD_TASK, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_FORWARD_TASK, v.UUID, string(b))
 	}
 
@@ -447,7 +450,7 @@ func (v *ForwardTask) Restart(ctx context.Context) error {
 	}
 
 	// Reload config from redis.
-	if b, err := rdb.HGet(ctx, SRS_FORWARD_CONFIG, v.Platform).Result(); err != nil {
+	if b, err := v.ds.Get(ctx, SRS_FORWARD_CONFIG, v.Platform); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_FORWARD_CONFIG, v.Platform)
 	} else if err = json.Unmarshal([]byte(b), v.config); err != nil {
 		return errors.Wrapf(err, "unmarshal %v", b)
@@ -504,7 +507,8 @@ func (v *ForwardTask) Run(ctx context.Context) error {
 	logger.Tf(ctx, "forward run task %v", v.String())
 
 	selectActiveStream := func() (*SrsStream, error) {
-		streams, err := rdb.HGetAll(ctx, SRS_STREAM_ACTIVE).Result()
+		//streams, err := rdb.HGetAll(ctx, SRS_STREAM_ACTIVE).Result()
+		streams, err := v.ds.SelectAll(ctx, SRS_STREAM_ACTIVE)
 		if err != nil {
 			return nil, errors.Wrapf(err, "hgetall %v", SRS_STREAM_ACTIVE)
 		}

@@ -2,13 +2,12 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
 	"context"
 	"net"
+	"platform/datasource"
 	"strings"
 	"sync"
 	// From ossrs.
@@ -20,10 +19,11 @@ var candidateWorker *CandidateWorker
 type CandidateWorker struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	ds     datasource.Datasource
 }
 
-func NewCandidateWorker() *CandidateWorker {
-	return &CandidateWorker{}
+func NewCandidateWorker(ds datasource.Datasource) *CandidateWorker {
+	return &CandidateWorker{ds: ds}
 }
 
 func (v *CandidateWorker) Close() error {

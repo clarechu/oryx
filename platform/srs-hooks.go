@@ -4,8 +4,6 @@
 // SPDX-License-Identifier: MIT
 //
 
-//go:build linux
-
 package main
 
 import (

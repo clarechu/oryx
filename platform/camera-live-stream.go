@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -13,6 +11,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,8 +22,7 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/google/uuid"
 )
 
@@ -36,10 +34,13 @@ type CameraWorker struct {
 
 	// The tasks we have started to IP camera streams,, key is platform in string, value is *CameraTask.
 	tasks sync.Map
+	ds    datasource.Datasource
 }
 
-func NewCameraWorker() *CameraWorker {
-	return &CameraWorker{}
+func NewCameraWorker(ds datasource.Datasource) *CameraWorker {
+	return &CameraWorker{
+		ds: ds,
+	}
 }
 
 func (v *CameraWorker) GetTask(platform string) *CameraTask {
@@ -100,7 +101,7 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 
 			if action == "update" {
 				var targetConf CameraConfigure
-				if config, err := rdb.HGet(ctx, SRS_CAMERA_CONFIG, userConf.Platform).Result(); err != nil && err != redis.Nil {
+				if config, err := v.ds.Get(ctx, SRS_CAMERA_CONFIG, userConf.Platform); err != nil {
 					return errors.Wrapf(err, "hget %v %v", SRS_CAMERA_CONFIG, userConf.Platform)
 				} else {
 					if config != "" {
@@ -112,7 +113,7 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 						return errors.Wrapf(err, "update %v with %v", targetConf.String(), userConf.String())
 					} else if newB, err := json.Marshal(&targetConf); err != nil {
 						return errors.Wrapf(err, "marshal %v", targetConf.String())
-					} else if err = rdb.HSet(ctx, SRS_CAMERA_CONFIG, userConf.Platform, string(newB)).Err(); err != nil && err != redis.Nil {
+					} else if err = v.ds.Set(ctx, SRS_CAMERA_CONFIG, userConf.Platform, string(newB)); err != nil {
 						return errors.Wrapf(err, "hset %v %v %v", SRS_CAMERA_CONFIG, userConf.Platform, string(newB))
 					}
 				}
@@ -129,7 +130,7 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 				return nil
 			} else {
 				confObjs := make(map[string]*CameraConfigure)
-				if configs, err := rdb.HGetAll(ctx, SRS_CAMERA_CONFIG).Result(); err != nil && err != redis.Nil {
+				if configs, err := v.ds.SelectAll(ctx, SRS_CAMERA_CONFIG); err != nil {
 					return errors.Wrapf(err, "hgetall %v", SRS_CAMERA_CONFIG)
 				} else {
 					for k, v := range configs {
@@ -169,7 +170,7 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 			}
 
 			res := make([]map[string]interface{}, 0)
-			if configs, err := rdb.HGetAll(ctx, SRS_CAMERA_CONFIG).Result(); err != nil && err != redis.Nil {
+			if configs, err := v.ds.SelectAll(ctx, SRS_CAMERA_CONFIG); err != nil {
 				return errors.Wrapf(err, "hgetall %v", SRS_CAMERA_CONFIG)
 			} else if len(configs) > 0 {
 				for k, v := range configs {
@@ -385,9 +386,10 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 				// permitting a 3Mbps continuous live stream for 7x24 hours. Therefore, it's crucial
 				// to restrict the input bitrate to prevent exceeding the traffic limit.
 				if format.Format.Bitrate != "" {
-					if limits, err := rdb.HGet(ctx, SRS_SYS_LIMITS, "camera").Int64(); err != nil && err != redis.Nil {
+					if ls, err := v.ds.Get(ctx, SRS_SYS_LIMITS, "camera"); err != nil {
 						return errors.Wrapf(err, "hget %v camera", SRS_SYS_LIMITS)
 					} else {
+						limits, _ := strconv.ParseInt(ls, 10, 64)
 						if limits == 0 {
 							limits = SrsSysLimitsCamera // in Kbps.
 						}
@@ -443,7 +445,7 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 
 			// Update redis object.
 			confObj := CameraConfigure{Platform: platform}
-			if conf, err := rdb.HGet(ctx, SRS_CAMERA_CONFIG, platform).Result(); err != nil && err != redis.Nil {
+			if conf, err := v.ds.Get(ctx, SRS_CAMERA_CONFIG, platform); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_CAMERA_CONFIG, platform)
 			} else if conf != "" {
 				if err = json.Unmarshal([]byte(conf), &confObj); err != nil {
@@ -455,10 +457,9 @@ func (v *CameraWorker) Handle(ctx context.Context, handler *http.ServeMux) error
 
 			if b, err := json.Marshal(&confObj); err != nil {
 				return errors.Wrapf(err, "marshal %v", confObj.String())
-			} else if err = rdb.HSet(ctx, SRS_CAMERA_CONFIG, platform, string(b)).Err(); err != nil && err != redis.Nil {
+			} else if err = v.ds.Set(ctx, SRS_CAMERA_CONFIG, platform, string(b)); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_CAMERA_CONFIG, platform, string(b))
 			}
-
 			// Restart the IP camera if exists.
 			if task := cameraWorker.GetTask(platform); task != nil {
 				if err := task.Restart(ctx); err != nil {
@@ -500,7 +501,7 @@ func (v *CameraWorker) Start(ctx context.Context) error {
 	logger.Tf(ctx, "Camera: start a worker")
 
 	// Load tasks from redis and force to kill all.
-	if objs, err := rdb.HGetAll(ctx, SRS_CAMERA_TASK).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_CAMERA_TASK); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_CAMERA_TASK)
 	} else if len(objs) > 0 {
 		for uuid, obj := range objs {
@@ -516,15 +517,15 @@ func (v *CameraWorker) Start(ctx context.Context) error {
 			}
 		}
 
-		if err = rdb.Del(ctx, SRS_CAMERA_TASK).Err(); err != nil && err != redis.Nil {
+		if err = v.ds.DeleteAll(ctx, SRS_CAMERA_TASK); err != nil {
 			return errors.Wrapf(err, "del %v", SRS_CAMERA_TASK)
 		}
 	}
 
 	// Load all configurations from redis.
 	loadTasks := func() error {
-		configItems, err := rdb.HGetAll(ctx, SRS_CAMERA_CONFIG).Result()
-		if err != nil && err != redis.Nil {
+		configItems, err := v.ds.SelectAll(ctx, SRS_CAMERA_CONFIG)
+		if err != nil {
 			return errors.Wrapf(err, "hgetall %v", SRS_CAMERA_CONFIG)
 		}
 		if len(configItems) == 0 {
@@ -687,10 +688,9 @@ func (v *CameraTask) saveTask(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal %v", v.String())
-	} else if err = rdb.HSet(ctx, SRS_CAMERA_TASK, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.cameraWorker.ds.Set(ctx, SRS_CAMERA_TASK, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_CAMERA_TASK, v.UUID, string(b))
 	}
-
 	return nil
 }
 
@@ -720,7 +720,7 @@ func (v *CameraTask) Restart(ctx context.Context) error {
 	}
 
 	// Reload config from redis.
-	if b, err := rdb.HGet(ctx, SRS_CAMERA_CONFIG, v.Platform).Result(); err != nil {
+	if b, err := v.cameraWorker.ds.Get(ctx, SRS_CAMERA_CONFIG, v.Platform); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_CAMERA_CONFIG, v.Platform)
 	} else if err = json.Unmarshal([]byte(b), v.config); err != nil {
 		return errors.Wrapf(err, "unmarshal %v", b)

@@ -1,5 +1,3 @@
-//go:build linux
-
 package main
 
 import (
@@ -7,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"platform/datasource"
 	"strings"
 	"time"
 
@@ -14,11 +13,9 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
 )
 
-func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
+func handleLiveRoomService(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) error {
 	ep := "/terraform/v1/live/room/create"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -45,13 +42,13 @@ func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
 			})
 			if b, err := json.Marshal(room); err != nil {
 				return errors.Wrapf(err, "marshal room")
-			} else if err := rdb.HSet(ctx, SRS_LIVE_ROOM, room.UUID, string(b)).Err(); err != nil {
+			} else if err := ds.Set(ctx, SRS_LIVE_ROOM, room.UUID, string(b)); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_LIVE_ROOM, room.UUID, string(b))
 			}
 
 			// Note that we need to update the auth secret, because we do not use room uuid as stream name.
 			roomPublishAuthKey := GenerateRoomPublishKey(room.StreamName)
-			if err := rdb.HSet(ctx, SRS_AUTH_SECRET, roomPublishAuthKey, room.Secret).Err(); err != nil {
+			if err := ds.Set(ctx, SRS_AUTH_SECRET, roomPublishAuthKey, room.Secret); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_AUTH_SECRET, roomPublishAuthKey, room.Secret)
 			}
 
@@ -83,7 +80,7 @@ func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			var room SrsLiveRoom
-			if r0, err := rdb.HGet(ctx, SRS_LIVE_ROOM, rid).Result(); err != nil && err != redis.Nil {
+			if r0, err := ds.Get(ctx, SRS_LIVE_ROOM, rid); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_LIVE_ROOM, rid)
 			} else if r0 == "" {
 				return errors.Errorf("live room %v not exists", rid)
@@ -128,13 +125,13 @@ func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
 			// TODO: FIXME: Should load room from redis and merge the fields.
 			if b, err := json.Marshal(room); err != nil {
 				return errors.Wrapf(err, "marshal room")
-			} else if err := rdb.HSet(ctx, SRS_LIVE_ROOM, room.UUID, string(b)).Err(); err != nil {
+			} else if err := ds.Set(ctx, SRS_LIVE_ROOM, room.UUID, string(b)); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_LIVE_ROOM, room.UUID, string(b))
 			}
 
 			// Note that we need to update the auth secret, because we do not use room uuid as stream name.
 			roomPublishAuthKey := GenerateRoomPublishKey(room.StreamName)
-			if err := rdb.HSet(ctx, SRS_AUTH_SECRET, roomPublishAuthKey, room.Secret).Err(); err != nil {
+			if err := ds.Set(ctx, SRS_AUTH_SECRET, roomPublishAuthKey, room.Secret); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_AUTH_SECRET, roomPublishAuthKey, room.Secret)
 			}
 
@@ -171,7 +168,7 @@ func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			var rooms []*SrsLiveRoom
-			if configs, err := rdb.HGetAll(ctx, SRS_LIVE_ROOM).Result(); err != nil && err != redis.Nil {
+			if configs, err := ds.SelectAll(ctx, SRS_LIVE_ROOM); err != nil {
 				return errors.Wrapf(err, "hgetall %v", SRS_LIVE_ROOM)
 			} else {
 				for k, v := range configs {
@@ -215,7 +212,7 @@ func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			var room SrsLiveRoom
-			if r0, err := rdb.HGet(ctx, SRS_LIVE_ROOM, roomUUID).Result(); err != nil && err != redis.Nil {
+			if r0, err := ds.Get(ctx, SRS_LIVE_ROOM, roomUUID); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_LIVE_ROOM, roomUUID)
 			} else if r0 == "" {
 				return errors.Errorf("live room %v not exists", roomUUID)
@@ -223,16 +220,14 @@ func handleLiveRoomService(ctx context.Context, handler *http.ServeMux) error {
 				return errors.Wrapf(err, "unmarshal %v %v", roomUUID, r0)
 			}
 
-			if err := rdb.HDel(ctx, SRS_LIVE_ROOM, roomUUID).Err(); err != nil && err != redis.Nil {
+			if err := ds.Delete(ctx, SRS_LIVE_ROOM, roomUUID); err != nil {
 				return errors.Wrapf(err, "hdel %v %v", SRS_LIVE_ROOM, roomUUID)
 			}
-
 			// Note that we need to update the auth secret, because we do not use room uuid as stream name.
 			roomPublishAuthKey := GenerateRoomPublishKey(room.StreamName)
-			if err := rdb.HDel(ctx, SRS_AUTH_SECRET, roomPublishAuthKey).Err(); err != nil {
+			if err := ds.Delete(ctx, SRS_AUTH_SECRET, roomPublishAuthKey); err != nil {
 				return errors.Wrapf(err, "hdel %v %v", SRS_AUTH_SECRET, roomPublishAuthKey)
 			}
-
 			ohttp.WriteData(ctx, w, r, nil)
 			logger.Tf(ctx, "srs remove room ok, uuid=%v", roomUUID)
 			return nil

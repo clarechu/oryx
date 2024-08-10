@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -16,6 +14,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"path"
+	"platform/datasource"
 	"runtime"
 	"strconv"
 	"strings"
@@ -35,12 +34,15 @@ type HttpService interface {
 	Run(ctx context.Context) error
 }
 
-func NewHTTPService() HttpService {
-	return &httpService{}
+func NewHTTPService(ds datasource.Datasource) HttpService {
+	return &httpService{
+		ds: ds,
+	}
 }
 
 type httpService struct {
 	servers []*http.Server
+	ds      datasource.Datasource
 }
 
 func (v *httpService) Close() error {
@@ -84,7 +86,7 @@ func (v *httpService) Run(ctx context.Context) error {
 	handler := http.NewServeMux()
 	if true {
 		serviceHandler := http.NewServeMux()
-		if err := handleHTTPService(ctx, serviceHandler); err != nil {
+		if err := handleHTTPService(ctx, serviceHandler, v.ds); err != nil {
 			return errors.Wrapf(err, "handle service")
 		}
 
@@ -213,7 +215,7 @@ func (v *httpService) Run(ctx context.Context) error {
 	return nil
 }
 
-func handleHTTPService(ctx context.Context, handler *http.ServeMux) error {
+func handleHTTPService(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) error {
 	ohttp.Server = fmt.Sprintf("Oryx/%v", version)
 
 	if err := callbackWorker.Handle(ctx, handler); err != nil {
@@ -248,15 +250,15 @@ func handleHTTPService(ctx context.Context, handler *http.ServeMux) error {
 		return errors.Wrapf(err, "handle hooks")
 	}
 
-	if err := handleLiveRoomService(ctx, handler); err != nil {
+	if err := handleLiveRoomService(ctx, handler, ds); err != nil {
 		return errors.Wrapf(err, "handle live room")
 	}
 
-	if err := handleDubbingService(ctx, handler); err != nil {
+	if err := handleDubbingService(ctx, handler, ds); err != nil {
 		return errors.Wrapf(err, "handle dubbing")
 	}
 
-	if err := handleAITalkService(ctx, handler); err != nil {
+	if err := handleAITalkService(ctx, handler, ds); err != nil {
 		return errors.Wrapf(err, "handle AI talk")
 	}
 
@@ -279,13 +281,13 @@ func handleHTTPService(ctx context.Context, handler *http.ServeMux) error {
 	handleMgmtBeianQuery(ctx, handler)
 	handleMgmtSecretQuery(ctx, handler)
 	handleMgmtBeianUpdate(ctx, handler)
-	handleMgmtNginxHlsUpdate(ctx, handler)
+	handleMgmtNginxHlsUpdate(ctx, handler, ds)
 	handleMgmtNginxHlsQuery(ctx, handler)
-	handleMgmtHlsLowLatencyUpdate(ctx, handler)
+	handleMgmtHlsLowLatencyUpdate(ctx, handler, ds)
 	handleMgmtHlsLowLatencyQuery(ctx, handler)
 	handleMgmtAutoSelfSignedCertificate(ctx, handler)
-	handleMgmtSsl(ctx, handler)
-	handleMgmtLetsEncrypt(ctx, handler)
+	handleMgmtSsl(ctx, handler, ds)
+	handleMgmtLetsEncrypt(ctx, handler, ds)
 	handleMgmtCertQuery(ctx, handler)
 	handleMgmtStreamsQuery(ctx, handler)
 	handleMgmtStreamsKickoff(ctx, handler)
@@ -1219,7 +1221,7 @@ func handleMgmtBeianUpdate(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtNginxHlsUpdate(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtNginxHlsUpdate(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/hphls/update"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1245,7 +1247,7 @@ func handleMgmtNginxHlsUpdate(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "hset %v noHlsCtx %v", SRS_HP_HLS, noHlsCtxValue)
 			}
 
-			if err := srsGenerateConfig(ctx); err != nil {
+			if err := srsGenerateConfig(ctx, ds); err != nil {
 				return errors.Wrapf(err, "generate SRS config")
 			}
 
@@ -1297,7 +1299,7 @@ func handleMgmtNginxHlsQuery(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtHlsLowLatencyUpdate(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtHlsLowLatencyUpdate(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/hlsll/update"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1323,7 +1325,7 @@ func handleMgmtHlsLowLatencyUpdate(ctx context.Context, handler *http.ServeMux) 
 				return errors.Wrapf(err, "hset %v hlsLowLatency %v", SRS_LL_HLS, hlsLowLatencyValue)
 			}
 
-			if err := srsGenerateConfig(ctx); err != nil {
+			if err := srsGenerateConfig(ctx, ds); err != nil {
 				return errors.Wrapf(err, "generate SRS config")
 			}
 
@@ -1407,7 +1409,7 @@ func handleMgmtAutoSelfSignedCertificate(ctx context.Context, handler *http.Serv
 	})
 }
 
-func handleMgmtSsl(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtSsl(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/ssl"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1444,7 +1446,7 @@ func handleMgmtSsl(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "set %v %v", SRS_HTTPS, "ssl")
 			}
 
-			if err := nginxGenerateConfig(ctx); err != nil {
+			if err := nginxGenerateConfig(ctx, ds); err != nil {
 				return errors.Wrapf(err, "nginx config and reload")
 			}
 
@@ -1457,7 +1459,7 @@ func handleMgmtSsl(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtLetsEncrypt(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtLetsEncrypt(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/letsencrypt"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1493,7 +1495,7 @@ func handleMgmtLetsEncrypt(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "set %v %v", SRS_HTTPS_DOMAIN, domain)
 			}
 
-			if err := nginxGenerateConfig(ctx); err != nil {
+			if err := nginxGenerateConfig(ctx, ds); err != nil {
 				return errors.Wrapf(err, "nginx config and reload")
 			}
 

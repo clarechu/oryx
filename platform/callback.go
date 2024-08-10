@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -13,8 +11,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/google/uuid"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"platform/datasource"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,9 +23,6 @@ import (
 	"github.com/ossrs/go-oryx-lib/errors"
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
-
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
 )
 
 var callbackWorker *CallbackWorker
@@ -39,12 +35,13 @@ type CallbackWorker struct {
 	ephemeralConfig CallbackConfig
 	// Whether update the config immediately.
 	updateConfig chan bool
-
-	lock sync.Mutex
+	ds           datasource.Datasource
+	lock         sync.Mutex
 }
 
-func NewCallbackWorker() *CallbackWorker {
+func NewCallbackWorker(ds datasource.Datasource) *CallbackWorker {
 	return &CallbackWorker{
+		ds:           ds,
 		updateConfig: make(chan bool, 1),
 	}
 }
@@ -70,17 +67,16 @@ func (v *CallbackWorker) Handle(ctx context.Context, handler *http.ServeMux) err
 			}
 
 			var config CallbackConfig
-			if err := config.Load(ctx); err != nil {
+			if err := config.Load(ctx, v.ds); err != nil {
 				return errors.Wrapf(err, "load")
 			}
-
-			req, err := rdb.HGet(ctx, SRS_HOOKS, "req").Result()
-			if err != nil && err != redis.Nil {
+			req, err := v.ds.Get(ctx, SRS_HOOKS, "req")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v req", SRS_HOOKS)
 			}
 
-			res, err := rdb.HGet(ctx, SRS_HOOKS, "res").Result()
-			if err != nil && err != redis.Nil {
+			res, err := v.ds.Get(ctx, SRS_HOOKS, "res")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v res", SRS_HOOKS)
 			}
 
@@ -122,16 +118,15 @@ func (v *CallbackWorker) Handle(ctx context.Context, handler *http.ServeMux) err
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			if err := rdb.HSet(ctx, SRS_HOOKS, "target", config.Target).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_HOOKS, "target", config.Target); err != nil {
 				return errors.Wrapf(err, "hset %v target %v", SRS_HOOKS, config.Target)
 			}
-			if err := rdb.HSet(ctx, SRS_HOOKS, "opaque", config.Opaque).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_HOOKS, "opaque", config.Opaque); err != nil {
 				return errors.Wrapf(err, "hset %v opaque %v", SRS_HOOKS, config.Opaque)
 			}
-			if err := rdb.HSet(ctx, SRS_HOOKS, "all", fmt.Sprintf("%v", config.All)).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_HOOKS, "all", fmt.Sprintf("%v", config.All)); err != nil {
 				return errors.Wrapf(err, "hset %v all %v", SRS_HOOKS, config.All)
 			}
-
 			// Use the request host as the default host.
 			if config.Host == "" {
 				config.Host = fmt.Sprintf("http://%v", r.Host)
@@ -139,7 +134,7 @@ func (v *CallbackWorker) Handle(ctx context.Context, handler *http.ServeMux) err
 					config.Host = fmt.Sprintf("https://%v", r.Host)
 				}
 			}
-			if err := rdb.HSet(ctx, SRS_HOOKS, "host", config.Host).Err(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_HOOKS, "host", config.Host); err != nil {
 				return errors.Wrapf(err, "hset %v host %v", SRS_HOOKS, config.Host)
 			}
 
@@ -218,7 +213,7 @@ func (v *CallbackWorker) Start(ctx context.Context) error {
 
 		for ctx.Err() == nil {
 			var config CallbackConfig
-			if err := config.Load(ctx); err != nil {
+			if err := config.Load(ctx, v.ds); err != nil {
 				logger.Wf(ctx, "load config %v err %+v", config, err)
 
 				select {
@@ -338,15 +333,14 @@ func (v *CallbackWorker) OnStreamMessage(ctx context.Context, action SrsAction, 
 			return errors.Errorf("response status %v", res.StatusCode)
 		}
 
-		b2, err := ioutil.ReadAll(res.Body)
+		b2, err := io.ReadAll(res.Body)
 		if err != nil {
 			return errors.Wrapf(err, "read body")
 		}
 
-		if err := rdb.HSet(ctx, SRS_HOOKS, "res", string(b2)).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Set(ctx, SRS_HOOKS, "res", string(b2)); err != nil {
 			return errors.Wrapf(err, "hset %v res %v", SRS_HOOKS, string(b2))
 		}
-
 		if err := pfn3(b, b2); err != nil {
 			return errors.Wrapf(err, "res body %v", string(b2))
 		}
@@ -359,8 +353,7 @@ func (v *CallbackWorker) OnStreamMessage(ctx context.Context, action SrsAction, 
 		if err != nil {
 			return errors.Wrapf(err, "marshal req")
 		}
-
-		if err := rdb.HSet(ctx, SRS_HOOKS, "req", string(b)).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Set(ctx, SRS_HOOKS, "req", string(b)); err != nil {
 			return errors.Wrapf(err, "hset %v req %v", SRS_HOOKS, string(b))
 		}
 
@@ -484,15 +477,14 @@ func (v *CallbackWorker) OnRecordMessage(ctx context.Context, action SrsAction, 
 			return errors.Errorf("response status %v", res.StatusCode)
 		}
 
-		b2, err := ioutil.ReadAll(res.Body)
+		b2, err := io.ReadAll(res.Body)
 		if err != nil {
 			return errors.Wrapf(err, "read body")
 		}
 
-		if err := rdb.HSet(ctx, SRS_HOOKS, "res", string(b2)).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Set(ctx, SRS_HOOKS, "res", string(b2)); err != nil {
 			return errors.Wrapf(err, "hset %v res %v", SRS_HOOKS, string(b2))
 		}
-
 		if err := pfn3(b, b2); err != nil {
 			return errors.Wrapf(err, "res body %v", string(b2))
 		}
@@ -505,8 +497,7 @@ func (v *CallbackWorker) OnRecordMessage(ctx context.Context, action SrsAction, 
 		if err != nil {
 			return errors.Wrapf(err, "marshal req")
 		}
-
-		if err := rdb.HSet(ctx, SRS_HOOKS, "req", string(b)).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Set(ctx, SRS_HOOKS, "req", string(b)); err != nil {
 			return errors.Wrapf(err, "hset %v req %v", SRS_HOOKS, string(b))
 		}
 
@@ -624,15 +615,14 @@ func (v *CallbackWorker) OnOCR(ctx context.Context, action SrsAction, taskUUID s
 			return errors.Errorf("response status %v", res.StatusCode)
 		}
 
-		b2, err := ioutil.ReadAll(res.Body)
+		b2, err := io.ReadAll(res.Body)
 		if err != nil {
 			return errors.Wrapf(err, "read body")
 		}
 
-		if err := rdb.HSet(ctx, SRS_HOOKS, "res", string(b2)).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Set(ctx, SRS_HOOKS, "res", string(b2)); err != nil {
 			return errors.Wrapf(err, "hset %v res %v", SRS_HOOKS, string(b2))
 		}
-
 		if err := pfn3(b, b2); err != nil {
 			return errors.Wrapf(err, "res body %v", string(b2))
 		}
@@ -646,10 +636,9 @@ func (v *CallbackWorker) OnOCR(ctx context.Context, action SrsAction, taskUUID s
 			return errors.Wrapf(err, "marshal req")
 		}
 
-		if err := rdb.HSet(ctx, SRS_HOOKS, "req", string(b)).Err(); err != nil && err != redis.Nil {
+		if err := v.ds.Set(ctx, SRS_HOOKS, "req", string(b)); err != nil {
 			return errors.Wrapf(err, "hset %v req %v", SRS_HOOKS, string(b))
 		}
-
 		if err := pfn2(b); err != nil {
 			return errors.Wrapf(err, "post with %s", string(b))
 		}
@@ -679,24 +668,23 @@ func (v CallbackConfig) String() string {
 		v.Target, v.Opaque, v.All, v.Host)
 }
 
-func (v *CallbackConfig) Load(ctx context.Context) (err error) {
-	if v.Target, err = rdb.HGet(ctx, SRS_HOOKS, "target").Result(); err != nil && err != redis.Nil {
+func (v *CallbackConfig) Load(ctx context.Context, ds datasource.Datasource) (err error) {
+	if v.Target, err = ds.Get(ctx, SRS_HOOKS, "target"); err != nil {
 		return errors.Wrapf(err, "hget %v target", SRS_HOOKS)
 	}
 
-	if v.Opaque, err = rdb.HGet(ctx, SRS_HOOKS, "opaque").Result(); err != nil && err != redis.Nil {
+	if v.Opaque, err = ds.Get(ctx, SRS_HOOKS, "opaque"); err != nil {
 		return errors.Wrapf(err, "hget %v opaque", SRS_HOOKS)
 	}
 
-	if all, err := rdb.HGet(ctx, SRS_HOOKS, "all").Result(); err != nil && err != redis.Nil {
+	if all, err := ds.Get(ctx, SRS_HOOKS, "all"); err != nil {
 		return errors.Wrapf(err, "hget %v all", SRS_HOOKS)
 	} else if all == "true" {
 		v.All = true
 	}
 
-	if v.Host, err = rdb.HGet(ctx, SRS_HOOKS, "host").Result(); err != nil && err != redis.Nil {
+	if v.Host, err = ds.Get(ctx, SRS_HOOKS, "host"); err != nil {
 		return errors.Wrapf(err, "hget %v host", SRS_HOOKS)
 	}
-
 	return nil
 }

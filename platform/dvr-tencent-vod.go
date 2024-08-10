@@ -2,8 +2,6 @@
 //
 // SPDX-License-Identifier: MIT
 
-//go:build linux
-
 package main
 
 import (
@@ -15,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"platform/datasource"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,8 +23,6 @@ import (
 	ohttp "github.com/ossrs/go-oryx-lib/http"
 	"github.com/ossrs/go-oryx-lib/logger"
 
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -49,10 +46,12 @@ type VodWorker struct {
 	msgs chan *SrsOnHlsObject
 	// The streams we're voding, key is m3u8 URL in string, value is m3u8 object *VodM3u8Stream.
 	streams sync.Map
+	ds      datasource.Datasource
 }
 
-func NewVodWorker() *VodWorker {
+func NewVodWorker(ds datasource.Datasource) *VodWorker {
 	return &VodWorker{
+		ds:   ds,
 		msgs: make(chan *SrsOnHlsObject, 1024),
 	}
 }
@@ -80,19 +79,18 @@ func (v *VodWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			all, err := rdb.HGet(ctx, SRS_VOD_PATTERNS, "all").Result()
-			if err != nil && err != redis.Nil {
+			all, err := v.ds.Get(ctx, SRS_VOD_PATTERNS, "all")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v all", SRS_VOD_PATTERNS)
 			}
 
-			appId, _ := rdb.HGet(ctx, SRS_TENCENT_CAM, "appId").Result()
-			secretId, _ := rdb.HGet(ctx, SRS_TENCENT_CAM, "secretId").Result()
-			secretKey, _ := rdb.HGet(ctx, SRS_TENCENT_CAM, "secretKey").Result()
+			appId, _ := v.ds.Get(ctx, SRS_TENCENT_CAM, "appId")
+			secretId, _ := v.ds.Get(ctx, SRS_TENCENT_CAM, "secretId")
+			secretKey, _ := v.ds.Get(ctx, SRS_TENCENT_CAM, "secretKey")
 
 			// VoD service status.
-			service, _ := rdb.HGet(ctx, SRS_TENCENT_VOD, "service").Result()
-			storage, _ := rdb.HGet(ctx, SRS_TENCENT_VOD, "storage").Result()
-
+			service, _ := v.ds.Get(ctx, SRS_TENCENT_VOD, "service")
+			storage, _ := v.ds.Get(ctx, SRS_TENCENT_VOD, "storage")
 			ohttp.WriteData(ctx, w, r, &struct {
 				All     bool `json:"all"`
 				Secret  bool `json:"secret"`
@@ -132,8 +130,7 @@ func (v *VodWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 			if err := Authenticate(ctx, apiSecret, token, r.Header); err != nil {
 				return errors.Wrapf(err, "authenticate")
 			}
-
-			if all, err := rdb.HSet(ctx, SRS_VOD_PATTERNS, "all", fmt.Sprintf("%v", all)).Result(); err != nil && err != redis.Nil {
+			if err := v.ds.Set(ctx, SRS_VOD_PATTERNS, "all", fmt.Sprintf("%v", all)); err != nil {
 				return errors.Wrapf(err, "hset %v all %v", SRS_VOD_PATTERNS, all)
 			}
 
@@ -162,9 +159,8 @@ func (v *VodWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 			if err := Authenticate(ctx, apiSecret, token, r.Header); err != nil {
 				return errors.Wrapf(err, "authenticate")
 			}
-
-			keys, cursor, err := rdb.HScan(ctx, SRS_VOD_M3U8_ARTIFACT, 0, "*", 100).Result()
-			if err != nil && err != redis.Nil {
+			keys, err := v.ds.Select(ctx, SRS_VOD_M3U8_ARTIFACT, &datasource.SelectOptions{Count: 100})
+			if err != nil {
 				return errors.Wrapf(err, "hscan %v 0 * 100", SRS_VOD_M3U8_ARTIFACT)
 			}
 
@@ -241,7 +237,7 @@ func (v *VodWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 
 					if b, err := json.Marshal(artifact); err != nil {
 						return errors.Wrapf(err, "marshal %v", artifact.String())
-					} else if err = rdb.HSet(ctx, SRS_VOD_M3U8_ARTIFACT, artifact.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+					} else if err = v.ds.Set(ctx, SRS_VOD_M3U8_ARTIFACT, artifact.UUID, string(b)); err != nil {
 						return errors.Wrapf(err, "hset %v %v %v", SRS_VOD_M3U8_ARTIFACT, artifact.UUID, string(b))
 					}
 					logger.Tf(ctx, "vod update task %v", artifact.String())
@@ -276,7 +272,7 @@ func (v *VodWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			ohttp.WriteData(ctx, w, r, files)
-			logger.Tf(ctx, "vod files ok, cursor=%v, token=%vB", cursor, len(token))
+			logger.Tf(ctx, "vod files ok, cursor=%v, token=%vB", 0, len(token))
 			return nil
 		}(); err != nil {
 			ohttp.WriteError(ctx, w, r, err)
@@ -297,7 +293,7 @@ func (v *VodWorker) Handle(ctx context.Context, handler *http.ServeMux) error {
 			}
 
 			var metadata M3u8VoDArtifact
-			if m3u8Metadata, err := rdb.HGet(ctx, SRS_VOD_M3U8_ARTIFACT, uuid).Result(); err != nil && err != redis.Nil {
+			if m3u8Metadata, err := v.ds.Get(ctx, SRS_VOD_M3U8_ARTIFACT, uuid); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_VOD_M3U8_ARTIFACT, uuid)
 			} else if m3u8Metadata == "" {
 				return errors.Errorf("no m3u8 of uuid=%v", uuid)
@@ -389,7 +385,7 @@ func (v *VodWorker) Start(ctx context.Context) error {
 	}
 
 	// Load all objects from redis.
-	if objs, err := rdb.HGetAll(ctx, SRS_VOD_M3U8_WORKING).Result(); err != nil && err != redis.Nil {
+	if objs, err := v.ds.SelectAll(ctx, SRS_VOD_M3U8_WORKING); err != nil {
 		return errors.Wrapf(err, "hgetall %v", SRS_VOD_M3U8_WORKING)
 	} else if len(objs) > 0 {
 		for m3u8URL, value := range objs {
@@ -427,6 +423,7 @@ func (v *VodWorker) Start(ctx context.Context) error {
 		var freshObject bool
 		if obj, loaded := v.streams.LoadOrStore(msg.Msg.M3u8URL, &VodM3u8Stream{
 			M3u8URL: msg.Msg.M3u8URL, UUID: uuid.NewString(), vodWorker: v,
+			ds: v.ds,
 		}); true {
 			m3u8LocalObj, freshObject = obj.(*VodM3u8Stream), !loaded
 		}
@@ -511,22 +508,21 @@ func (v *VodWorker) updateCredential(ctx context.Context) error {
 	}
 
 	// The credential might not be ready, so we ignore error.
-	if secretId, err := rdb.HGet(ctx, SRS_TENCENT_CAM, "secretId").Result(); err == nil {
+	if secretId, err := v.ds.Get(ctx, SRS_TENCENT_CAM, "secretId"); err == nil {
 		v.secretId = secretId
 	}
 
-	if secretKey, err := rdb.HGet(ctx, SRS_TENCENT_CAM, "secretKey").Result(); err == nil {
+	if secretKey, err := v.ds.Get(ctx, SRS_TENCENT_CAM, "secretKey"); err == nil {
 		v.secretKey = secretKey
 	}
 
-	if service, err := rdb.HGet(ctx, SRS_TENCENT_VOD, "service").Result(); err == nil && service != "ok" {
+	if service, err := v.ds.Get(ctx, SRS_TENCENT_VOD, "service"); err == nil && service != "ok" {
 		if tv, err := strconv.ParseInt(service, 10, 64); err != nil {
 			return errors.Wrapf(err, "parse vod appid %v", service)
 		} else {
 			v.vodAppID = uint64(tv)
 		}
 	}
-
 	changed := v.secretId != previous.SecretId || v.secretKey != previous.SecretKey || v.vodAppID != previous.VodAppID
 	credentialOK := v.secretId != "" && v.secretKey != "" && v.vodAppID > 0
 	if (v.vodClient == nil || changed) && credentialOK {
@@ -589,6 +585,7 @@ type VodM3u8Stream struct {
 	artifact *M3u8VoDArtifact
 	// To protect the fields.
 	lock sync.Mutex
+	ds   datasource.Datasource
 }
 
 func (v VodM3u8Stream) String() string {
@@ -601,10 +598,9 @@ func (v *VodM3u8Stream) deleteObject(ctx context.Context) error {
 	v.lock.Lock()
 	defer v.lock.Unlock()
 
-	if err := rdb.HDel(ctx, SRS_VOD_M3U8_WORKING, v.M3u8URL).Err(); err != nil && err != redis.Nil {
+	if err := v.ds.Delete(ctx, SRS_VOD_M3U8_WORKING, v.M3u8URL); err != nil {
 		return errors.Wrapf(err, "hdel %v %v", SRS_VOD_M3U8_WORKING, v.M3u8URL)
 	}
-
 	return nil
 }
 
@@ -614,7 +610,7 @@ func (v *VodM3u8Stream) saveObject(ctx context.Context) error {
 
 	if b, err := json.Marshal(v); err != nil {
 		return errors.Wrapf(err, "marshal object")
-	} else if err = rdb.HSet(ctx, SRS_VOD_M3U8_WORKING, v.M3u8URL, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.ds.Set(ctx, SRS_VOD_M3U8_WORKING, v.M3u8URL, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_VOD_M3U8_WORKING, v.M3u8URL, string(b))
 	}
 	return nil
@@ -626,7 +622,7 @@ func (v *VodM3u8Stream) saveArtifact(ctx context.Context, artifact *M3u8VoDArtif
 
 	if b, err := json.Marshal(artifact); err != nil {
 		return errors.Wrapf(err, "marshal %v", artifact.String())
-	} else if err = rdb.HSet(ctx, SRS_VOD_M3U8_ARTIFACT, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+	} else if err = v.ds.Set(ctx, SRS_VOD_M3U8_ARTIFACT, v.UUID, string(b)); err != nil {
 		return errors.Wrapf(err, "hset %v %v %v", SRS_VOD_M3U8_ARTIFACT, v.UUID, string(b))
 	}
 	return nil
@@ -733,7 +729,7 @@ func (v *VodM3u8Stream) Initialize(ctx context.Context, r *VodWorker) error {
 	logger.Tf(ctx, "vod initialize url=%v, uuid=%v", v.M3u8URL, v.UUID)
 
 	// Try to load artifact from redis. The final artifact is VoD HLS object.
-	if value, err := rdb.HGet(ctx, SRS_VOD_M3U8_ARTIFACT, v.UUID).Result(); err != nil && err != redis.Nil {
+	if value, err := v.ds.Get(ctx, SRS_VOD_M3U8_ARTIFACT, v.UUID); err != nil {
 		return errors.Wrapf(err, "hget %v %v", SRS_VOD_M3U8_ARTIFACT, v.UUID)
 	} else if value != "" {
 		artifact := &M3u8VoDArtifact{}
@@ -841,7 +837,7 @@ func (v *VodM3u8Stream) refreshCosClient(ctx context.Context, oldClient *cos.Cli
 
 	refreshCosToken := func(ctx context.Context, cosToken *VodCosToken) (*VodCosToken, error) {
 		if cosToken == nil {
-			if token, err := rdb.HGet(ctx, SRS_VOD_COS_TOKEN, v.UUID).Result(); err != nil && err != redis.Nil {
+			if token, err := v.ds.Get(ctx, SRS_VOD_COS_TOKEN, v.UUID); err != nil {
 				return nil, errors.Wrapf(err, "hget %v %v", SRS_VOD_COS_TOKEN, v.UUID)
 			} else if token != "" {
 				cosToken = &VodCosToken{}
@@ -908,7 +904,7 @@ func (v *VodM3u8Stream) refreshCosClient(ctx context.Context, oldClient *cos.Cli
 		// Save token to redis.
 		if b, err := json.Marshal(cosToken); err != nil {
 			return nil, errors.Wrapf(err, "marshal %v", cosToken.String())
-		} else if err := rdb.HSet(ctx, SRS_VOD_COS_TOKEN, v.UUID, string(b)).Err(); err != nil && err != redis.Nil {
+		} else if err := v.ds.Set(ctx, SRS_VOD_COS_TOKEN, v.UUID, string(b)); err != nil {
 			return nil, errors.Wrapf(err, "hset %v %v %v", SRS_VOD_COS_TOKEN, v.UUID, string(b))
 		}
 
@@ -1030,7 +1026,7 @@ func (v *VodM3u8Stream) finishM3u8(ctx context.Context, cosClient *cos.Client, c
 	// Start a remux task to covert HLS to MP4.
 	// See https://cloud.tencent.com/document/product/266/33427
 	var definition int64
-	if remux, err := rdb.HGet(ctx, SRS_TENCENT_VOD, "remux").Result(); err != nil && err != redis.Nil {
+	if remux, err := v.ds.Get(ctx, SRS_TENCENT_VOD, "remux"); err != nil {
 		return errors.Wrapf(err, "hget %v remux", SRS_TENCENT_VOD)
 	} else if remux != "" {
 		transcode := &VodTranscodeTemplate{}

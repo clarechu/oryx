@@ -44,7 +44,13 @@ func NewRedisDatasource() (Datasource, error) {
 }
 
 func (r *RedisDatasource) Get(ctx context.Context, key, field string) (string, error) {
-	data, err := r.rdb.HGet(ctx, key, field).Result()
+	var err error
+	var data string
+	if field == "" {
+		data, err = r.rdb.Get(ctx, key).Result()
+	} else {
+		data, err = r.rdb.HGet(ctx, key, field).Result()
+	}
 	// Nil reply returned by Redis when key does not exist.
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return "", err
@@ -53,7 +59,13 @@ func (r *RedisDatasource) Get(ctx context.Context, key, field string) (string, e
 }
 
 func (r *RedisDatasource) Set(ctx context.Context, key, field string, value string) error {
-	err := r.rdb.HSet(ctx, key, field, value).Err()
+	var err error
+	if field == "" {
+		err = r.rdb.Set(ctx, key, field, 0).Err()
+	} else {
+		err = r.rdb.HSet(ctx, key, field, value).Err()
+	}
+
 	// Nil reply returned by Redis when key does not exist.
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return err

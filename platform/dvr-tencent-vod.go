@@ -516,7 +516,7 @@ func (v *VodWorker) updateCredential(ctx context.Context) error {
 		v.secretKey = secretKey
 	}
 
-	if service, err := v.ds.Get(ctx, SRS_TENCENT_VOD, "service"); err == nil && service != "ok" {
+	if service, err := v.ds.Get(ctx, SRS_TENCENT_VOD, "service"); err == nil && service != "ok" && service != "" {
 		if tv, err := strconv.ParseInt(service, 10, 64); err != nil {
 			return errors.Wrapf(err, "parse vod appid %v", service)
 		} else {

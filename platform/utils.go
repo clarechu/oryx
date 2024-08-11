@@ -30,8 +30,7 @@ import (
 
 	"github.com/ossrs/go-oryx-lib/errors"
 	"github.com/ossrs/go-oryx-lib/logger"
-	// Use v8 because we use Go 1.16+, while v9 requires Go 1.18+
-	"github.com/go-redis/redis/v8"
+
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -496,7 +495,7 @@ func envYtdlProxy() string {
 	return os.Getenv("YTDL_PROXY")
 }
 
-// rdb is a global redis client object.
+/*// rdb is a global redis client object.
 var rdb *redis.Client
 
 // InitRdb create and init global rdb, which is a redis client.
@@ -512,7 +511,7 @@ func InitRdb() error {
 		DB:       redisDatabase,
 	})
 	return nil
-}
+}*/
 
 // For platform to build token by jwt.
 func createToken(ctx context.Context, apiSecret string) (expireAt, createAt time.Time, token string, err error) {

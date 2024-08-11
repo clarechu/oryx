@@ -4,7 +4,10 @@
 
 package main
 
-import "context"
+import (
+	"context"
+	"platform/datasource"
+)
 
 var fastCache *FastCache
 
@@ -13,20 +16,21 @@ type FastCache struct {
 	HLSHighPerformance bool
 	// Whether deliver HLS in low latency mode.
 	HLSLowLatency bool
+	ds            datasource.Datasource
 }
 
-func NewFastCache() *FastCache {
-	return &FastCache{}
+func NewFastCache(ds datasource.Datasource) *FastCache {
+	return &FastCache{ds: ds}
 }
 
 func (v *FastCache) Refresh(ctx context.Context) error {
-	if vs, _ := rdb.HGet(ctx, SRS_LL_HLS, "hlsLowLatency").Result(); vs == "true" {
+	if vs, _ := v.ds.Get(ctx, SRS_LL_HLS, "hlsLowLatency"); vs == "true" {
 		v.HLSLowLatency = true
 	} else {
 		v.HLSLowLatency = false
 	}
 
-	if vs, _ := rdb.HGet(ctx, SRS_HP_HLS, "noHlsCtx").Result(); vs == "true" {
+	if vs, _ := v.ds.Get(ctx, SRS_HP_HLS, "noHlsCtx"); vs == "true" {
 		v.HLSHighPerformance = true
 	} else {
 		v.HLSHighPerformance = false

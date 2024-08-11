@@ -39,7 +39,7 @@ func init() {
 	conf = NewConfig()
 
 	// We use polling to update some fast cache, for example, LLHLS config.
-	fastCache = NewFastCache()
+	fastCache = NewFastCache(ds)
 }
 
 func main() {
@@ -169,11 +169,10 @@ func doMain(ctx context.Context) error {
 		return errors.Wrapf(err, "init mgmt os")
 	}
 
-	// Initialize global rdb, the redis client.
-	if err := InitRdb(); err != nil {
+	/*if err := InitRdb(); err != nil {
 		return errors.Wrapf(err, "init rdb")
-	}
-
+	}*/
+	// Initialize global rdb, the redis client.
 	ds, err := datasource.NewDatasource(os.Getenv("DATASOURCE_TYPE"))
 	if err != nil {
 		return err

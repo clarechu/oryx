@@ -10,6 +10,8 @@ type Datasource interface {
 	Select(ctx context.Context, key string, options *SelectOptions) ([]string, error)
 	SelectAll(ctx context.Context, key string) (map[string]string, error)
 	Count(ctx context.Context, key string) (int64, error)
+	Incr(ctx context.Context, key, field string, value int64) error
+	Length(ctx context.Context, key string) (int64, error)
 }
 
 type SelectOptions struct {

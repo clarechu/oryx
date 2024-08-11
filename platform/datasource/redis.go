@@ -101,5 +101,26 @@ func (r *RedisDatasource) SelectAll(ctx context.Context, key string) (map[string
 }
 
 func (r *RedisDatasource) Count(ctx context.Context, key string) (int64, error) {
-	return r.rdb.HLen(ctx, key).Result()
+	r1, err := r.rdb.HLen(ctx, key).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, err
+	}
+	return r1, nil
+}
+
+// Incr 当前元素原子操作
+func (r *RedisDatasource) Incr(ctx context.Context, key, field string, value int64) error {
+	err := r.rdb.HIncrBy(ctx, key, field, value).Err()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return err
+	}
+	return nil
+}
+
+func (r *RedisDatasource) Length(ctx context.Context, key string) (int64, error) {
+	r1, err := r.rdb.HLen(ctx, key).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return 0, err
+	}
+	return r1, nil
 }

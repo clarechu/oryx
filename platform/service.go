@@ -246,7 +246,7 @@ func handleHTTPService(ctx context.Context, handler *http.ServeMux, ds datasourc
 		return errors.Wrapf(err, "handle IP camera")
 	}
 
-	if err := handleHooksService(ctx, handler); err != nil {
+	if err := handleHooksService(ctx, handler, ds); err != nil {
 		return errors.Wrapf(err, "handle hooks")
 	}
 
@@ -268,29 +268,29 @@ func handleHTTPService(ctx context.Context, handler *http.ServeMux, ds datasourc
 	handleMgmtVersions(ctx, handler)
 	handleFFmpegVersions(ctx, handler)
 	handleMgmtInit(ctx, handler)
-	handleMgmtCheck(ctx, handler)
-	handleMgmtEnvs(ctx, handler)
+	handleMgmtCheck(ctx, handler, ds)
+	handleMgmtEnvs(ctx, handler, ds)
 	handleMgmtToken(ctx, handler)
 	handleMgmtLogin(ctx, handler)
-	handleMgmtStatus(ctx, handler)
-	handleMgmtBilibili(ctx, handler)
-	handleMgmtLimitsQuery(ctx, handler)
-	handleMgmtLimitsUpdate(ctx, handler)
-	handleMgmtOpenAIQuery(ctx, handler)
-	handleMgmtOpenAIUpdate(ctx, handler)
-	handleMgmtBeianQuery(ctx, handler)
+	handleMgmtStatus(ctx, handler, ds)
+	handleMgmtBilibili(ctx, handler, ds)
+	handleMgmtLimitsQuery(ctx, handler, ds)
+	handleMgmtLimitsUpdate(ctx, handler, ds)
+	handleMgmtOpenAIQuery(ctx, handler, ds)
+	handleMgmtOpenAIUpdate(ctx, handler, ds)
+	handleMgmtBeianQuery(ctx, handler, ds)
 	handleMgmtSecretQuery(ctx, handler)
-	handleMgmtBeianUpdate(ctx, handler)
+	handleMgmtBeianUpdate(ctx, handler, ds)
 	handleMgmtNginxHlsUpdate(ctx, handler, ds)
-	handleMgmtNginxHlsQuery(ctx, handler)
+	handleMgmtNginxHlsQuery(ctx, handler, ds)
 	handleMgmtHlsLowLatencyUpdate(ctx, handler, ds)
-	handleMgmtHlsLowLatencyQuery(ctx, handler)
+	handleMgmtHlsLowLatencyQuery(ctx, handler, ds)
 	handleMgmtAutoSelfSignedCertificate(ctx, handler)
 	handleMgmtSsl(ctx, handler, ds)
 	handleMgmtLetsEncrypt(ctx, handler, ds)
-	handleMgmtCertQuery(ctx, handler)
-	handleMgmtStreamsQuery(ctx, handler)
-	handleMgmtStreamsKickoff(ctx, handler)
+	handleMgmtCertQuery(ctx, handler, ds)
+	handleMgmtStreamsQuery(ctx, handler, ds)
+	handleMgmtStreamsKickoff(ctx, handler, ds)
 	handleMgmtUI(ctx, handler)
 
 	proxy2023, err := httpCreateProxy("http://127.0.0.1:2023")
@@ -553,17 +553,17 @@ func handleMgmtInit(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtCheck(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtCheck(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/check"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
 		if err := func() error {
 			// Check whether redis is ok.
-			if r0, err := rdb.HGet(ctx, SRS_AUTH_SECRET, "pubSecret").Result(); err != nil && err != redis.Nil {
+			if r0, err := ds.Get(ctx, SRS_AUTH_SECRET, "pubSecret"); err != nil {
 				return errors.Wrapf(err, "hget %v pubSecret", SRS_AUTH_SECRET)
-			} else if r1, err := rdb.HLen(ctx, SRS_FIRST_BOOT).Result(); err != nil && err != redis.Nil {
+			} else if r1, err := ds.Length(ctx, SRS_FIRST_BOOT); err != nil {
 				return errors.Wrapf(err, "get %v", SRS_FIRST_BOOT)
-			} else if r2, err := rdb.HLen(ctx, SRS_TENCENT_LH).Result(); err != nil && err != redis.Nil {
+			} else if r2, err := ds.Length(ctx, SRS_TENCENT_LH); err != nil {
 				return errors.Wrapf(err, "get %v", SRS_TENCENT_LH)
 			} else if r0 == "" || r1 <= 0 || r2 <= 0 {
 				return errors.New("Redis is not  ready")
@@ -583,7 +583,7 @@ func handleMgmtCheck(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtEnvs(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtEnvs(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/envs"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -602,7 +602,7 @@ func handleMgmtEnvs(ctx context.Context, handler *http.ServeMux) {
 				locale = "un"
 			}
 
-			if err := rdb.Set(ctx, SRS_LOCALE, locale, 0).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_LOCALE, "", locale); err != nil {
 				return errors.Wrapf(err, "set %v %v", SRS_LOCALE, locale)
 			}
 
@@ -798,7 +798,7 @@ func handleMgmtLogin(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtStatus(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtStatus(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/status"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -817,8 +817,8 @@ func handleMgmtStatus(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			upgrading, err := rdb.HGet(ctx, SRS_UPGRADING, "upgrading").Result()
-			if err != nil && err != redis.Nil {
+			upgrading, err := ds.Get(ctx, SRS_UPGRADING, "upgrading")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v upgrading", SRS_UPGRADING)
 			}
 
@@ -841,7 +841,7 @@ func handleMgmtStatus(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtBilibili(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtBilibili(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/bilibili"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -869,7 +869,7 @@ func handleMgmtBilibili(ctx context.Context, handler *http.ServeMux) {
 				Update string                 `json:"update"`
 				Res    map[string]interface{} `json:"res"`
 			}{}
-			if bilibili, err := rdb.HGet(ctx, SRS_CACHE_BILIBILI, bvid).Result(); err != nil && err != redis.Nil {
+			if bilibili, err := ds.Get(ctx, SRS_CACHE_BILIBILI, bvid); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_CACHE_BILIBILI, bvid)
 			} else if bilibili != "" {
 				if err := json.Unmarshal([]byte(bilibili), &bilibiliObj); err != nil {
@@ -921,7 +921,7 @@ func handleMgmtBilibili(ctx context.Context, handler *http.ServeMux) {
 			}
 			if b, err := json.Marshal(bilibiliObj); err != nil {
 				return errors.Wrapf(err, "json marshal %v", bilibiliObj)
-			} else if err = rdb.HSet(ctx, SRS_CACHE_BILIBILI, bvid, string(b)).Err(); err != nil {
+			} else if err = ds.Set(ctx, SRS_CACHE_BILIBILI, bvid, string(b)); err != nil {
 				return errors.Wrapf(err, "update redis for %v", string(b))
 			}
 
@@ -934,7 +934,7 @@ func handleMgmtBilibili(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtOpenAIQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtOpenAIQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/openai/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -953,18 +953,18 @@ func handleMgmtOpenAIQuery(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			aiSecretKey, err := rdb.HGet(ctx, SRS_SYS_OPENAI, "key").Result()
-			if err != nil && err != redis.Nil {
+			aiSecretKey, err := ds.Get(ctx, SRS_SYS_OPENAI, "key")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v key", SRS_SYS_OPENAI)
 			}
 
-			aiBaseURL, err := rdb.HGet(ctx, SRS_SYS_OPENAI, "url").Result()
-			if err != nil && err != redis.Nil {
+			aiBaseURL, err := ds.Get(ctx, SRS_SYS_OPENAI, "url")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v url", SRS_SYS_OPENAI)
 			}
 
-			aiOrganization, err := rdb.HGet(ctx, SRS_SYS_OPENAI, "org").Result()
-			if err != nil && err != redis.Nil {
+			aiOrganization, err := ds.Get(ctx, SRS_SYS_OPENAI, "org")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v org", SRS_SYS_OPENAI)
 			}
 
@@ -987,7 +987,7 @@ func handleMgmtOpenAIQuery(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtOpenAIUpdate(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtOpenAIUpdate(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/openai/update"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1018,13 +1018,13 @@ func handleMgmtOpenAIUpdate(ctx context.Context, handler *http.ServeMux) {
 				return errors.New("no aiBaseURL")
 			}
 
-			if err := rdb.HSet(ctx, SRS_SYS_OPENAI, "key", aiSecretKey).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_SYS_OPENAI, "key", aiSecretKey); err != nil {
 				return errors.Wrapf(err, "hset %v key %v", SRS_SYS_OPENAI, aiSecretKey)
 			}
-			if err := rdb.HSet(ctx, SRS_SYS_OPENAI, "url", aiBaseURL).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_SYS_OPENAI, "url", aiBaseURL); err != nil {
 				return errors.Wrapf(err, "hset %v url %v", SRS_SYS_OPENAI, aiBaseURL)
 			}
-			if err := rdb.HSet(ctx, SRS_SYS_OPENAI, "org", aiOrganization).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_SYS_OPENAI, "org", aiOrganization); err != nil {
 				return errors.Wrapf(err, "hset %v org %v", SRS_SYS_OPENAI, aiOrganization)
 			}
 
@@ -1037,7 +1037,7 @@ func handleMgmtOpenAIUpdate(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtLimitsQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtLimitsQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/limits/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1056,17 +1056,21 @@ func handleMgmtLimitsQuery(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			vLiveLimits, err := rdb.HGet(ctx, SRS_SYS_LIMITS, "vlive").Int64()
-			if err != nil && err != redis.Nil {
+			vls, err := ds.Get(ctx, SRS_SYS_LIMITS, "vlive")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v vlive", SRS_SYS_LIMITS)
-			} else if vLiveLimits == 0 {
+			}
+			vLiveLimits, _ := strconv.ParseInt(vls, 10, 64)
+			if vLiveLimits == 0 {
 				vLiveLimits = SrsSysLimitsVLive
 			}
 
-			ipCameraLimits, err := rdb.HGet(ctx, SRS_SYS_LIMITS, "camera").Int64()
-			if err != nil && err != redis.Nil {
+			ils, err := ds.Get(ctx, SRS_SYS_LIMITS, "camera")
+			if err != nil {
 				return errors.Wrapf(err, "hget %v camera", SRS_SYS_LIMITS)
-			} else if ipCameraLimits == 0 {
+			}
+			ipCameraLimits, _ := strconv.ParseInt(ils, 10, 64)
+			if ipCameraLimits == 0 {
 				ipCameraLimits = SrsSysLimitsCamera
 			}
 
@@ -1087,7 +1091,7 @@ func handleMgmtLimitsQuery(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtLimitsUpdate(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtLimitsUpdate(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/limits/update"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1116,10 +1120,10 @@ func handleMgmtLimitsUpdate(ctx context.Context, handler *http.ServeMux) {
 				return errors.Errorf("invalid vlive %v", vlive)
 			}
 
-			if err := rdb.HSet(ctx, SRS_SYS_LIMITS, "vlive", vlive).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_SYS_LIMITS, "vlive", string(vlive)); err != nil {
 				return errors.Wrapf(err, "hset %v vlive %v", SRS_SYS_LIMITS, vlive)
 			}
-			if err := rdb.HSet(ctx, SRS_SYS_LIMITS, "camera", camera).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_SYS_LIMITS, "camera", string(camera)); err != nil {
 				return errors.Wrapf(err, "hset %v camera %v", SRS_SYS_LIMITS, camera)
 			}
 
@@ -1133,13 +1137,13 @@ func handleMgmtLimitsUpdate(ctx context.Context, handler *http.ServeMux) {
 }
 
 // Note that this API is not verified by token.
-func handleMgmtBeianQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtBeianQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/beian/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
 		if err := func() error {
-			r0, err := rdb.HGetAll(ctx, SRS_BEIAN).Result()
-			if err != nil && err != redis.Nil {
+			r0, err := ds.SelectAll(ctx, SRS_BEIAN)
+			if err != nil {
 				return errors.Wrapf(err, "hgetall %v", SRS_BEIAN)
 			}
 
@@ -1180,7 +1184,7 @@ func handleMgmtSecretQuery(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtBeianUpdate(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtBeianUpdate(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/beian/update"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1208,7 +1212,7 @@ func handleMgmtBeianUpdate(ctx context.Context, handler *http.ServeMux) {
 				return errors.New("no text")
 			}
 
-			if err := rdb.HSet(ctx, SRS_BEIAN, beian, text).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_BEIAN, beian, text); err != nil {
 				return errors.Wrapf(err, "hset %v %v %v", SRS_BEIAN, beian, text)
 			}
 
@@ -1243,7 +1247,7 @@ func handleMgmtNginxHlsUpdate(ctx context.Context, handler *http.ServeMux, ds da
 			}
 
 			noHlsCtxValue := fmt.Sprintf("%v", noHlsCtx)
-			if err := rdb.HSet(ctx, SRS_HP_HLS, "noHlsCtx", noHlsCtxValue).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_HP_HLS, "noHlsCtx", noHlsCtxValue); err != nil {
 				return errors.Wrapf(err, "hset %v noHlsCtx %v", SRS_HP_HLS, noHlsCtxValue)
 			}
 
@@ -1260,7 +1264,7 @@ func handleMgmtNginxHlsUpdate(ctx context.Context, handler *http.ServeMux, ds da
 	})
 }
 
-func handleMgmtNginxHlsQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtNginxHlsQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/hphls/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1280,7 +1284,7 @@ func handleMgmtNginxHlsQuery(ctx context.Context, handler *http.ServeMux) {
 			}
 
 			var enabled bool
-			if v, err := rdb.HGet(ctx, SRS_HP_HLS, "noHlsCtx").Result(); err != nil && err != redis.Nil {
+			if v, err := ds.Get(ctx, SRS_HP_HLS, "noHlsCtx"); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_HP_HLS, "noHlsCtx")
 			} else {
 				enabled = v == "true"
@@ -1321,7 +1325,7 @@ func handleMgmtHlsLowLatencyUpdate(ctx context.Context, handler *http.ServeMux, 
 			}
 
 			hlsLowLatencyValue := fmt.Sprintf("%v", hlsLowLatency)
-			if err := rdb.HSet(ctx, SRS_LL_HLS, "hlsLowLatency", hlsLowLatencyValue).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_LL_HLS, "hlsLowLatency", hlsLowLatencyValue); err != nil {
 				return errors.Wrapf(err, "hset %v hlsLowLatency %v", SRS_LL_HLS, hlsLowLatencyValue)
 			}
 
@@ -1338,7 +1342,7 @@ func handleMgmtHlsLowLatencyUpdate(ctx context.Context, handler *http.ServeMux, 
 	})
 }
 
-func handleMgmtHlsLowLatencyQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtHlsLowLatencyQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/hlsll/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1358,7 +1362,7 @@ func handleMgmtHlsLowLatencyQuery(ctx context.Context, handler *http.ServeMux) {
 			}
 
 			var enabled bool
-			if v, err := rdb.HGet(ctx, SRS_LL_HLS, "hlsLowLatency").Result(); err != nil && err != redis.Nil {
+			if v, err := ds.Get(ctx, SRS_LL_HLS, "hlsLowLatency"); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_LL_HLS, "hlsLowLatency")
 			} else {
 				enabled = v == "true"
@@ -1442,7 +1446,7 @@ func handleMgmtSsl(ctx context.Context, handler *http.ServeMux, ds datasource.Da
 				return errors.Wrapf(err, "updateSslFiles key=%vB, crt=%vB", len(key), len(crt))
 			}
 
-			if err := rdb.Set(ctx, SRS_HTTPS, "ssl", 0).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_HTTPS, "", "ssl"); err != nil {
 				return errors.Wrapf(err, "set %v %v", SRS_HTTPS, "ssl")
 			}
 
@@ -1488,10 +1492,10 @@ func handleMgmtLetsEncrypt(ctx context.Context, handler *http.ServeMux, ds datas
 				return errors.Wrapf(err, "updateSslFiles domain=%v", domain)
 			}
 
-			if err := rdb.Set(ctx, SRS_HTTPS, "lets", 0).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_HTTPS, "", "lets"); err != nil {
 				return errors.Wrapf(err, "set %v %v", SRS_HTTPS, "lets")
 			}
-			if err := rdb.Set(ctx, SRS_HTTPS_DOMAIN, domain, 0).Err(); err != nil && err != redis.Nil {
+			if err := ds.Set(ctx, SRS_HTTPS_DOMAIN, "", domain); err != nil {
 				return errors.Wrapf(err, "set %v %v", SRS_HTTPS_DOMAIN, domain)
 			}
 
@@ -1508,7 +1512,7 @@ func handleMgmtLetsEncrypt(ctx context.Context, handler *http.ServeMux, ds datas
 	})
 }
 
-func handleMgmtCertQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtCertQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/cert/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1527,12 +1531,12 @@ func handleMgmtCertQuery(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			provider, err := rdb.Get(ctx, SRS_HTTPS).Result()
+			provider, err := ds.Get(ctx, "", SRS_HTTPS)
 			if err != nil && err != redis.Nil {
 				return errors.Wrapf(err, "get %v", SRS_HTTPS)
 			}
 
-			domain, err := rdb.Get(ctx, SRS_HTTPS_DOMAIN).Result()
+			domain, err := ds.Get(ctx, "", SRS_HTTPS_DOMAIN)
 			if err != nil && err != redis.Nil {
 				return errors.Wrapf(err, "get %v", SRS_HTTPS_DOMAIN)
 			}
@@ -1563,7 +1567,7 @@ func handleMgmtCertQuery(ctx context.Context, handler *http.ServeMux) {
 	})
 }
 
-func handleMgmtStreamsQuery(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtStreamsQuery(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/streams/query"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1582,7 +1586,7 @@ func handleMgmtStreamsQuery(ctx context.Context, handler *http.ServeMux) {
 				return errors.Wrapf(err, "authenticate")
 			}
 
-			streams, err := rdb.HGetAll(ctx, SRS_STREAM_ACTIVE).Result()
+			streams, err := ds.SelectAll(ctx, SRS_STREAM_ACTIVE)
 			if err != nil {
 				return errors.Wrapf(err, "hgetall %v", SRS_STREAM_ACTIVE)
 			}
@@ -1613,7 +1617,7 @@ func handleMgmtStreamsQuery(ctx context.Context, handler *http.ServeMux) {
 // See SRS error code ERROR_RTMP_CLIENT_NOT_FOUND
 const ErrorRtmpClientNotFound = 2049
 
-func handleMgmtStreamsKickoff(ctx context.Context, handler *http.ServeMux) {
+func handleMgmtStreamsKickoff(ctx context.Context, handler *http.ServeMux, ds datasource.Datasource) {
 	ep := "/terraform/v1/mgmt/streams/kickoff"
 	logger.Tf(ctx, "Handle %v", ep)
 	handler.HandleFunc(ep, func(w http.ResponseWriter, r *http.Request) {
@@ -1648,7 +1652,7 @@ func handleMgmtStreamsKickoff(ctx context.Context, handler *http.ServeMux) {
 
 			streamObject := &SrsStream{Vhost: vhost, App: app, Stream: stream}
 			streamURL := streamObject.StreamURL()
-			if target, err := rdb.HGet(ctx, SRS_STREAM_ACTIVE, streamURL).Result(); err != nil && err != redis.Nil {
+			if target, err := ds.Get(ctx, SRS_STREAM_ACTIVE, streamURL); err != nil {
 				return errors.Wrapf(err, "hget %v %v", SRS_STREAM_ACTIVE, streamURL)
 			} else if target == "" {
 				return errors.Errorf("stream not found %v", streamURL)
@@ -1713,7 +1717,7 @@ func handleMgmtStreamsKickoff(ctx context.Context, handler *http.ServeMux) {
 				}
 			}
 
-			if err := rdb.HDel(ctx, SRS_STREAM_ACTIVE, streamURL).Err(); err != nil && err != redis.Nil {
+			if err := ds.Delete(ctx, SRS_STREAM_ACTIVE, streamURL); err != nil {
 				return errors.Wrapf(err, "hdel %v %v", SRS_STREAM_ACTIVE, streamURL)
 			}
 

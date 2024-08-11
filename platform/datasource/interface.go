@@ -11,7 +11,6 @@ type Datasource interface {
 	SelectAll(ctx context.Context, key string) (map[string]string, error)
 	Count(ctx context.Context, key string) (int64, error)
 	Incr(ctx context.Context, key, field string, value int64) error
-	Length(ctx context.Context, key string) (int64, error)
 }
 
 type SelectOptions struct {
@@ -22,7 +21,7 @@ type SelectOptions struct {
 func NewDatasource(datasourceType string) (Datasource, error) {
 	switch datasourceType {
 	case "mysql":
-		panic("not implement")
+		return NewMySQLDatasource()
 	case "redis":
 		return NewRedisDatasource()
 	}

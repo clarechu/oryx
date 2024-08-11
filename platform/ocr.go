@@ -1050,6 +1050,9 @@ func NewOCRTask(ds datasource.Datasource) *OCRTask {
 		// Create new stream signal.
 		signalNewStream: make(chan *SrsStream, 1),
 		ds:              ds,
+		config: OCRConfig{
+			ds: ds,
+		},
 	}
 }
 

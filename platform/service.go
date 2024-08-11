@@ -561,9 +561,9 @@ func handleMgmtCheck(ctx context.Context, handler *http.ServeMux, ds datasource.
 			// Check whether redis is ok.
 			if r0, err := ds.Get(ctx, SRS_AUTH_SECRET, "pubSecret"); err != nil {
 				return errors.Wrapf(err, "hget %v pubSecret", SRS_AUTH_SECRET)
-			} else if r1, err := ds.Length(ctx, SRS_FIRST_BOOT); err != nil {
+			} else if r1, err := ds.Count(ctx, SRS_FIRST_BOOT); err != nil {
 				return errors.Wrapf(err, "get %v", SRS_FIRST_BOOT)
-			} else if r2, err := ds.Length(ctx, SRS_TENCENT_LH); err != nil {
+			} else if r2, err := ds.Count(ctx, SRS_TENCENT_LH); err != nil {
 				return errors.Wrapf(err, "get %v", SRS_TENCENT_LH)
 			} else if r0 == "" || r1 <= 0 || r2 <= 0 {
 				return errors.New("Redis is not  ready")

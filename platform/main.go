@@ -31,15 +31,7 @@ import (
 var conf *Config
 
 func init() {
-	ds, err := datasource.NewDatasource(os.Getenv("DATASOURCE_TYPE"))
-	if err != nil {
-		panic(err)
-	}
-	certManager = NewCertManager(ds)
 	conf = NewConfig()
-
-	// We use polling to update some fast cache, for example, LLHLS config.
-	fastCache = NewFastCache(ds)
 }
 
 func main() {
@@ -111,13 +103,14 @@ func doMain(ctx context.Context) error {
 	setEnvDefault("REACT_APP_LOCALE", "en")
 	// Whether enable the Go pprof.
 	setEnvDefault("GO_PPROF", "")
-
+	setEnvDefault("DATASOURCE_TYPE", "redis")
+	// Whether enable the Go pprof.
+	setEnvDefault("MYSQL_URL", "gorm:gorm@tcp(127.0.0.1:3306)/gorm?charset=utf8&parseTime=True&loc=Local")
 	// Migrate from mgmt.
 	setEnvDefault("REDIS_DATABASE", "0")
 	setEnvDefault("REDIS_HOST", "127.0.0.1")
 	setEnvDefault("REDIS_PORT", "6379")
 	setEnvDefault("MGMT_LISTEN", "2022")
-
 	// For HTTPS.
 	setEnvDefault("HTTPS_LISTEN", "2443")
 	setEnvDefault("AUTO_SELF_SIGNED_CERTIFICATE", "on")
@@ -178,6 +171,11 @@ func doMain(ctx context.Context) error {
 		return err
 	}
 	logger.Tf(ctx, "init datasource(redis client) ok")
+
+	certManager = NewCertManager(ds)
+
+	// We use polling to update some fast cache, for example, LLHLS config.
+	fastCache = NewFastCache(ds)
 
 	// For platform, we should initOS after redis.
 	// Setup the OS for redis, which should never depends on redis.

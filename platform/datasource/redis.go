@@ -116,11 +116,3 @@ func (r *RedisDatasource) Incr(ctx context.Context, key, field string, value int
 	}
 	return nil
 }
-
-func (r *RedisDatasource) Length(ctx context.Context, key string) (int64, error) {
-	r1, err := r.rdb.HLen(ctx, key).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return 0, err
-	}
-	return r1, nil
-}

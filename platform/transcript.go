@@ -172,7 +172,7 @@ func (v *TranscriptWorker) Handle(ctx context.Context, handler *http.ServeMux) e
 			}); err != nil {
 				return errors.Wrapf(err, "parse body")
 			}
-
+			transcriptConfig.ds = v.ds
 			apiSecret := envApiSecret()
 			if err := Authenticate(ctx, apiSecret, token, r.Header); err != nil {
 				return errors.Wrapf(err, "authenticate")
@@ -1516,6 +1516,9 @@ func NewTranscriptTask(ds datasource.Datasource) *TranscriptTask {
 		// Create new stream signal.
 		signalNewStream: make(chan *SrsStream, 1),
 		ds:              ds,
+		config: TranscriptConfig{
+			ds: ds,
+		},
 	}
 }
 

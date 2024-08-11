@@ -1314,7 +1314,7 @@ func (v *SrsStream) IsRTC() bool {
 
 // ParseBody read the body from r, and unmarshal JSON to v.
 func ParseBody(ctx context.Context, r io.ReadCloser, v interface{}) error {
-	b, err := ioutil.ReadAll(r)
+	b, err := io.ReadAll(r)
 	if err != nil {
 		return errors.Wrapf(err, "read body")
 	}

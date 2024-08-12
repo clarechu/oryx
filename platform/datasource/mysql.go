@@ -2,12 +2,15 @@ package datasource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"log"
 	"os"
 	"strconv"
+	"time"
 )
 
 type MySQLDatasource struct {
@@ -15,6 +18,16 @@ type MySQLDatasource struct {
 }
 
 func NewMySQLDatasource() (Datasource, error) {
+	newLogger := logger.New(
+		log.New(os.Stdout, "\r\n", log.LstdFlags), // io writer
+		logger.Config{
+			SlowThreshold:             time.Second,   // Slow SQL threshold
+			LogLevel:                  logger.Silent, // Log level
+			IgnoreRecordNotFoundError: true,          // Ignore ErrRecordNotFound error for logger
+			ParameterizedQueries:      true,          // Don't include params in the SQL log
+			Colorful:                  false,         // Disable color
+		},
+	)
 	db, err := gorm.Open(mysql.New(mysql.Config{
 		DSN:                       envMySQL(), // DSN data source name
 		DefaultStringSize:         256,        // string 类型字段的默认长度
@@ -22,7 +35,10 @@ func NewMySQLDatasource() (Datasource, error) {
 		DontSupportRenameIndex:    true,       // 重命名索引时采用删除并新建的方式，MySQL 5.7 之前的数据库和 MariaDB 不支持重命名索引
 		DontSupportRenameColumn:   true,       // 用 `change` 重命名列，MySQL 8 之前的数据库和 MariaDB 不支持重命名列
 		SkipInitializeWithVersion: false,      // 根据当前 MySQL 版本自动配置
-	}), &gorm.Config{})
+
+	}), &gorm.Config{
+		Logger: newLogger,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +59,7 @@ func envMySQL() string {
 func (m *MySQLDatasource) Get(ctx context.Context, key, field string) (string, error) {
 	config := Config{}
 	err := m.engine.WithContext(ctx).Where("c_key=? and c_field=?", key, field).First(&config).Error
-	if err != nil {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", err
 	}
 	return config.Value, nil
@@ -58,11 +74,19 @@ func (m *MySQLDatasource) Set(ctx context.Context, key, field string, value stri
 }
 
 func (m *MySQLDatasource) Delete(ctx context.Context, key, field string) error {
-	return m.engine.WithContext(ctx).Where("c_key=? and c_field=?", key, field).Delete(&Config{}).Error
+	err := m.engine.WithContext(ctx).Where("c_key=? and c_field=?", key, field).Delete(&Config{}).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (m *MySQLDatasource) DeleteAll(ctx context.Context, key string) error {
-	return m.engine.WithContext(ctx).Where("c_key=?", key).Delete(&Config{}).Error
+	err := m.engine.WithContext(ctx).Where("c_key=?", key).Delete(&Config{}).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (m *MySQLDatasource) Select(ctx context.Context, key string, options *SelectOptions) ([]string, error) {
@@ -93,7 +117,7 @@ func (m *MySQLDatasource) SelectAll(ctx context.Context, key string) (map[string
 
 func (m *MySQLDatasource) Count(ctx context.Context, key string) (int64, error) {
 	var count int64
-	err := m.engine.WithContext(ctx).Where("c_key=?", key).Count(&count).Error
+	err := m.engine.WithContext(ctx).Model(&Config{}).Where("c_key=?", key).Count(&count).Error
 	if err != nil {
 		return 0, err
 	}

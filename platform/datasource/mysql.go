@@ -2,6 +2,7 @@ package datasource
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -40,10 +41,12 @@ func envMySQL() string {
 	return os.Getenv("MYSQL_URL")
 }
 
+var notFoundError error = errors.New("record not found")
+
 func (m *MySQLDatasource) Get(ctx context.Context, key, field string) (string, error) {
 	config := Config{}
 	err := m.engine.WithContext(ctx).Where("c_key=? and c_field=?", key, field).First(&config).Error
-	if err != nil {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", err
 	}
 	return config.Value, nil
@@ -58,11 +61,19 @@ func (m *MySQLDatasource) Set(ctx context.Context, key, field string, value stri
 }
 
 func (m *MySQLDatasource) Delete(ctx context.Context, key, field string) error {
-	return m.engine.WithContext(ctx).Where("c_key=? and c_field=?", key, field).Delete(&Config{}).Error
+	err := m.engine.WithContext(ctx).Where("c_key=? and c_field=?", key, field).Delete(&Config{}).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (m *MySQLDatasource) DeleteAll(ctx context.Context, key string) error {
-	return m.engine.WithContext(ctx).Where("c_key=?", key).Delete(&Config{}).Error
+	err := m.engine.WithContext(ctx).Where("c_key=?", key).Delete(&Config{}).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (m *MySQLDatasource) Select(ctx context.Context, key string, options *SelectOptions) ([]string, error) {

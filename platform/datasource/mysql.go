@@ -125,15 +125,23 @@ func (m *MySQLDatasource) Count(ctx context.Context, key string) (int64, error) 
 }
 
 func (m *MySQLDatasource) Incr(ctx context.Context, key, field string, value int64) error {
-	oldValue, err := m.Get(ctx, key, field)
+	config := Config{}
+	tx := m.engine.Begin()
+	defer tx.Commit()
+	err := tx.WithContext(ctx).
+		//Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("c_key=? and c_field=?", key, field).First(&config).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if config.Value == "" {
+		return nil
+	}
+	parseInt, err := strconv.ParseInt(config.Value, 10, 64)
 	if err != nil {
 		return err
 	}
-	parseInt, err := strconv.ParseInt(oldValue, 10, 64)
-	if err != nil {
-		return err
-	}
-	return m.engine.WithContext(ctx).Model(&Config{}).
+	return tx.WithContext(ctx).Model(&Config{}).
 		Where("c_key=? and c_field=?", key, field).
 		Update("c_value", fmt.Sprintf("%d", parseInt+value)).Error
 }
